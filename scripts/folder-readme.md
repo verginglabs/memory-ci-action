@@ -17,7 +17,9 @@ Verging Memory CI/
       REPORT.md
       diff.json
       release.json
-      evidence/                  the files the report's Evidence pointers name, one per failed test
+      evidence/                  the files the report's Evidence pointers name
+        <agent setup>/           one directory per agent setup on the release
+          <test>-<version>.md    one file per failed test; absent when every test passed
 ```
 
 The files are written by the Verging Memory CI GitHub Action (verginglabs/memory-ci-action) after each release. Every release is delivered twice: a preliminary report as soon as testing finishes, and a final report by next business day, with any corrections from the heavier grading. The files here are whichever report the action fetched last; the `Stage` row of the report and `diff.json`'s `stage` field say which one you are holding. When a final report lands after a run already committed the preliminary one, the next run of the action fetches it and commits the update on its own.

@@ -9,6 +9,7 @@ Verging Memory CI runs each release of your memory tool through the test suites 
 ```yaml
 name: Verging Memory CI
 on:
+  workflow_dispatch:
   push:
     branches: [main]
 permissions:
@@ -84,8 +85,12 @@ Verging Memory CI/
       REPORT.md                  the regression report, written for a human
       diff.json                  the same findings, machine readable; gate on release_verdict
       release.json               release_id, vendor_version, scope, corrections_due_by
-      evidence/                  one file per failed test; absent when every test passed
+      evidence/                  the files the report's Evidence pointers name
+        <agent setup>/           one directory per agent setup on the release
+          <test>-<version>.md    one file per failed test; absent when every test passed
 ```
+
+`workflow_dispatch` is in the snippet on purpose. After you edit this workflow file, start the next job with **Run workflow**. **Re-run all jobs** repeats a job with the workflow file as it was when that job first started, so it never picks up your edit.
 
 The commit lands on the branch that triggered the run. If that push is not possible (a protected branch, or a race with other pushes after three rebase retries), the job does not fail: the same commit is delivered on the branch `verging-memory-ci/reports`, and the action opens (or updates) a pull request titled "Verging Memory CI reports" into your default branch. The run log says plainly which of the two happened.
 

@@ -47,10 +47,33 @@ git_config_identity() {
   fi
 }
 
+# evidence_name_ok NAME: true when NAME is a name the Verging Memory CI API
+# emits for an evidence file, and nothing else.
+#
+# THE EVIDENCE PATH CONTRACT (keep this in step with the report renderer):
+#
+#   evidence/<file>.md                     one agent setup on the release
+#   evidence/<agent-setup>/<file>.md       a release across several setups
+#
+# <agent-setup> is the setup name lowercased with spaces turned into
+# hyphens; <file> is <test-id>-<vendor_version>. Both segments use letters,
+# digits, dots, underscores, plus signs, and hyphens, and neither starts
+# with a hyphen. Exactly one setup segment is accepted: no deeper nesting,
+# no "..", no doubled slash, no leading slash, no absolute path, ".md" only.
+# So a written file can only land inside the release directory's evidence/.
+evidence_name_ok() {
+  local name="$1"
+  case "$name" in
+    *..*|*//*) return 1 ;;
+  esac
+  printf '%s' "$name" \
+    | grep -Eq '^evidence/([A-Za-z0-9_+][A-Za-z0-9._+-]*/)?[A-Za-z0-9][A-Za-z0-9._+-]*\.md$'
+}
+
 # write_release_dir REPORT_JSON DIR: write REPORT.md, diff.json, release.json,
 # and evidence/ into DIR from a fetched report body.
 write_release_dir() {
-  local report="$1" dir="$2" count row name
+  local report="$1" dir="$2" count row name written refused prior
   mkdir -p "$dir"
 
   # REPORT.md: the markdown the API returns.
@@ -72,26 +95,34 @@ write_release_dir() {
   jq '{release_id, vendor_version, scope, corrections_due_by}' "$report" > "$dir/release.json"
 
   # evidence/: the files the report's Evidence pointers name, one per failed
-  # test per release; nothing to write when every test passed. Only names of
-  # the exact form evidence/<file>.md are written, so nothing can land
-  # outside the release directory.
+  # test per release; nothing to write when every test passed. Every name is
+  # checked against evidence_name_ok before anything is written, so a file
+  # can only land inside this release's evidence/ directory.
   rm -rf "$dir/evidence"
   count="$(jq -r '.evidence | length' "$report" 2>/dev/null || echo 0)"
   case "$count" in ''|null|*[!0-9]*) count=0 ;; esac
   if [ "$count" -gt 0 ]; then
     mkdir -p "$dir/evidence"
-    jq -c '.evidence[]' "$report" | while IFS= read -r row; do
+    written=0
+    refused=0
+    while IFS= read -r row; do
       name="$(printf '%s' "$row" | jq -r '.name')"
-      if ! printf '%s' "$name" | grep -Eq '^evidence/[A-Za-z0-9][A-Za-z0-9._+-]*\.md$'; then
-        echo "::warning::skipping evidence entry with unexpected name: $name"
+      if ! evidence_name_ok "$name"; then
+        echo "::error::refusing an evidence entry whose name is not one this action writes: $name"
+        refused=$((refused + 1))
         continue
       fi
-      case "$name" in
-        *..*) echo "::warning::skipping evidence entry with unexpected name: $name"; continue ;;
-      esac
+      mkdir -p "$(dirname "$dir/$name")"
       printf '%s' "$row" | jq -r '.content' > "$dir/$name"
-    done
-    echo "Wrote $count evidence file(s) under $dir/evidence/"
+      written=$((written + 1))
+    done < <(jq -c '.evidence[]' "$report")
+    echo "Wrote $written of $count evidence file(s) under $dir/evidence/"
+    if [ "$refused" -gt 0 ]; then
+      echo "::error::$refused of $count evidence file(s) were not written; the report links to files that are not in this folder"
+      prior="$(state_get evidence_refused)"
+      case "$prior" in ''|*[!0-9]*) prior=0 ;; esac
+      state_set evidence_refused "$((prior + refused))"
+    fi
   fi
   return 0
 }

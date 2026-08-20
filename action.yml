@@ -101,7 +101,7 @@ runs:
         GH_TOKEN: ${{ github.token }}
       run: '"$GITHUB_ACTION_PATH/scripts/surfaces.sh"'
 
-    - name: Set outputs
+    - name: Set outputs and check the report is complete
       id: finish
       shell: bash
       run: '"$GITHUB_ACTION_PATH/scripts/set_outputs.sh"'

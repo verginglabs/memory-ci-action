@@ -186,8 +186,9 @@ happy_scenario() { # $1 release id
       diff: {format: "release-diff/v1", verdict: "pass", cost_verdict: "pass",
              release_verdict: "ready", stage: "preliminary"},
       evidence: [
-        {name: "evidence/core-recall-updated-facts-1.md", content: "what was asked, what each release answered"},
-        {name: "evidence/truth-maintenance-3.md", content: "second evidence file"}
+        {name: "evidence/production-mcp/cr1c07-2.31.0.md", content: "what was asked, what each release answered"},
+        {name: "evidence/production-mcp/tm1c02-2.31.0.md", content: "second evidence file"},
+        {name: "evidence/cr1u11-2.31.0.md", content: "a flat name, the shape a single-setup release still uses"}
       ]
     }
   }'
@@ -215,9 +216,13 @@ case_happy_path() {
   check_file "REPORT.md written" "$dir/REPORT.md"
   check_file "diff.json written" "$dir/diff.json"
   check_file "release.json written" "$dir/release.json"
-  check_file "first evidence file written" "$dir/evidence/core-recall-updated-facts-1.md"
-  check_file "second evidence file written" "$dir/evidence/truth-maintenance-3.md"
-  check_grep "evidence content is the delivered content" "what was asked, what each release answered" "$dir/evidence/core-recall-updated-facts-1.md"
+  check_file "per-setup evidence file written under its setup directory" "$dir/evidence/production-mcp/cr1c07-2.31.0.md"
+  check_file "second per-setup evidence file written" "$dir/evidence/production-mcp/tm1c02-2.31.0.md"
+  check_file "flat evidence file written" "$dir/evidence/cr1u11-2.31.0.md"
+  check_grep "evidence content is the delivered content" "what was asked, what each release answered" "$dir/evidence/production-mcp/cr1c07-2.31.0.md"
+  check_eq "every evidence file the report serves is on disk" "3" \
+    "$(find "$dir/evidence" -type f -name '*.md' | wc -l | tr -d ' ')"
+  check_grep "the log states what was written against what was served" "Wrote 3 of 3 evidence file(s)" "$CASE_TMP/run.log"
   check_file "index.md written" "$WORKSPACE/$FOLDER/releases/index.md"
   check_grep "index row carries the release" "[$rid](2026-08-15-2.31.0/REPORT.md) | Ready | preliminary" "$WORKSPACE/$FOLDER/releases/index.md"
   check_file "folder README written" "$WORKSPACE/$FOLDER/README.md"
@@ -561,6 +566,72 @@ case_surfaces() {
   end_case
 }
 
+case_evidence_paths() {
+  begin_case "evidence files land at the exact paths the report names, and nothing else is written"
+  local rid="run_20260820_d55af6c7f6b3"
+  local md scenario
+  md="$(make_report_md "Larkspur 2.31.0" "Not ready: 1 accuracy failure" "Preliminary report (the final report follows by next business day)")"
+  # Three names the API emits, and four it never emits. A run that writes
+  # the three and refuses the four is the whole point of this case: the
+  # earlier writer refused all seven, said it had written seven, and ended
+  # green.
+  scenario="$(jq -n --arg md "$md" --arg rid "$rid" '{
+    receipt: {release_id: $rid, received_at: "2026-08-20T13:40:00.000Z",
+              scope: {suites: ["core-recall"]}},
+    statuses: [{release_id: $rid, status: "report_ready", corrections_due_by: "2026-08-21"}],
+    report: {
+      release_id: $rid, status: "report_ready", vendor_version: "2.31.0",
+      scope: {suites: ["core-recall"]}, corrections_due_by: "2026-08-21",
+      report_markdown: $md,
+      diff: {format: "release-diff/v1", release_verdict: "not_ready", stage: "preliminary"},
+      evidence: [
+        {name: "evidence/production-mcp/cr1c07-2.31.0.md", content: "per setup, first setup"},
+        {name: "evidence/agent-sdk/cr1c07-2.31.0.md", content: "per setup, second setup"},
+        {name: "evidence/tm1t04-2.31.0.md", content: "flat, the single-setup shape"},
+        {name: "evidence/../../etc/x.md", content: "must never be written"},
+        {name: "evidence/a/b/c.md", content: "must never be written"},
+        {name: "/evidence/leading-slash.md", content: "must never be written"},
+        {name: "evidence/notes.txt", content: "must never be written"}
+      ]
+    }
+  }')"
+  start_mock "$scenario" || { end_case; return; }
+  setup_env
+  make_repos
+
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh;       check_exit "reconcile exits 0" 0 "$STEP_EXIT"
+  run_step run_release.sh;     check_exit "run_release exits 0" 0 "$STEP_EXIT"
+  run_step commit_push.sh;     check_exit "commit_push exits 0" 0 "$STEP_EXIT"
+
+  local dir="$WORKSPACE/$FOLDER/releases/2026-08-20-2.31.0"
+  check_file "first setup's evidence file at its exact path" "$dir/evidence/production-mcp/cr1c07-2.31.0.md"
+  check_file "second setup's evidence file at its exact path" "$dir/evidence/agent-sdk/cr1c07-2.31.0.md"
+  check_file "the flat name still lands directly under evidence/" "$dir/evidence/tm1t04-2.31.0.md"
+  check_grep "the content is the delivered content" "per setup, second setup" "$dir/evidence/agent-sdk/cr1c07-2.31.0.md"
+
+  check_no_path "the traversal attempt wrote nothing" "$WORKSPACE/$FOLDER/etc"
+  check_no_path "a deeper path wrote nothing" "$dir/evidence/a"
+  check_no_path "a leading slash wrote nothing" "$dir/evidence/leading-slash.md"
+  check_no_path "a name that is not .md wrote nothing" "$dir/evidence/notes.txt"
+
+  check_eq "exactly the three named files are on disk" "3" \
+    "$(find "$dir/evidence" -type f | wc -l | tr -d ' ')"
+  check_grep "the log states what was written against what was served" "Wrote 3 of 7 evidence file(s)" "$CASE_TMP/run.log"
+  check_grep "the refused name is named in the log" "evidence/../../etc/x.md" "$CASE_TMP/run.log"
+  check_grep "the loss is an error, not a warning" "::error::refusing an evidence entry" "$CASE_TMP/run.log"
+
+  # The report still reaches the repository; the job still ends red.
+  check_eq "the report is committed even though evidence was refused" \
+    "Verging Memory CI: report for 2.31.0 ($rid): Not ready: 1 accuracy failure" \
+    "$(git -C "$ORIGIN" log -1 --format=%s main)"
+  run_step set_outputs.sh
+  check_exit "the run ends red when a named evidence file is missing" 1 "$STEP_EXIT"
+  check_grep "outputs are still set" "release_id=$rid" "$GITHUB_OUTPUT"
+  check_grep "the job summary says which report is short of files" "did not reach the report folder" "$GITHUB_STEP_SUMMARY"
+  end_case
+}
+
 case_vocabulary() {
   begin_case "vocabulary sweep: the banned words and em dashes appear nowhere"
   # The banned strings are assembled from pieces so this file never contains
@@ -596,6 +667,7 @@ case_product_name
 case_held
 case_failed
 case_fetch_only
+case_evidence_paths
 case_reconcile
 case_push_retry
 case_push_fallback

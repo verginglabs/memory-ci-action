@@ -47,6 +47,70 @@ git_config_identity() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# THE NAME RULES. One place, mirroring the API's lib/safe-name.mjs exactly,
+# so the client and the API cannot drift apart on what a customer may type.
+#
+# The API routes two rules by field name (its SAFE_NAME_RE and SAFE_TITLE_RE):
+#
+#   slug rule, for vendor_version. Letters, digits, dots, underscores, plus
+#   signs and hyphens; no leading hyphen; 1 to 64 characters. vendor_version
+#   keeps this rule because it names the delivered evidence files, so it is a
+#   path segment.
+#
+#   display-name rule, for product_name and the environment (agent setup)
+#   name. The slug charset PLUS single internal spaces, so institutional
+#   names like "Production MCP" and "Agent SDK" are accepted (ruled by
+#   #472 D6 A). No leading or trailing space, no doubled space, still no
+#   leading hyphen, still 1 to 64 characters.
+#
+# The environment name becomes a directory: the API lowercases it and turns
+# spaces into hyphens to get the agent-setup slug that names the evidence
+# subdirectory. agent_setup_slug is that same transform, and every slug is
+# put through safe_path_segment_ok before it is trusted as a folder name.
+
+# safe_name_ok NAME: the API's slug rule.
+safe_name_ok() {
+  local name="$1"
+  [ "${#name}" -ge 1 ] && [ "${#name}" -le 64 ] || return 1
+  case "$name" in -*) return 1 ;; esac
+  printf '%s' "$name" | grep -Eq '^[A-Za-z0-9._+-]+$'
+}
+
+# safe_title_ok NAME: the API's display-name rule.
+safe_title_ok() {
+  local name="$1"
+  [ "${#name}" -ge 1 ] && [ "${#name}" -le 64 ] || return 1
+  case "$name" in -*) return 1 ;; esac
+  printf '%s' "$name" | grep -Eq '^[A-Za-z0-9._+-]+( [A-Za-z0-9._+-]+)*$'
+}
+
+# agent_setup_slug NAME: the directory name the API derives from an
+# agent-setup name, character for character with the report renderer's
+# String(name).toLowerCase().replace(/ /g, "-").
+agent_setup_slug() {
+  printf '%s' "$1" | tr 'A-Z' 'a-z' | tr ' ' '-'
+}
+
+# safe_path_segment_ok SEGMENT: true when SEGMENT is safe to use as ONE
+# directory or file name. This is the guard that keeps a widened name rule
+# from widening what can be written: whatever a customer may type, the
+# segment it produces still cannot be this directory, its parent, or a path.
+#
+# "." and ".." are refused even though the API's name rule accepts them as
+# names: an agent setup named ".." would slug to ".." and name the parent
+# directory. A dot INSIDE a segment ("a..b") is an ordinary character and is
+# allowed, exactly as the API allows it.
+safe_path_segment_ok() {
+  local seg="$1"
+  case "$seg" in
+    ''|.|..) return 1 ;;
+    -*) return 1 ;;
+    */*) return 1 ;;
+  esac
+  printf '%s' "$seg" | grep -Eq '^[A-Za-z0-9._+-]+$'
+}
+
 # evidence_name_ok NAME: true when NAME is a name the Verging Memory CI API
 # emits for an evidence file, and nothing else.
 #
@@ -55,19 +119,25 @@ git_config_identity() {
 #   evidence/<file>.md                     one agent setup on the release
 #   evidence/<agent-setup>/<file>.md       a release across several setups
 #
-# <agent-setup> is the setup name lowercased with spaces turned into
-# hyphens; <file> is <test-id>-<vendor_version>. Both segments use letters,
-# digits, dots, underscores, plus signs, and hyphens, and neither starts
-# with a hyphen. Exactly one setup segment is accepted: no deeper nesting,
-# no "..", no doubled slash, no leading slash, no absolute path, ".md" only.
-# So a written file can only land inside the release directory's evidence/.
+# <agent-setup> is agent_setup_slug of the setup name; <file> is
+# <test-id>-<vendor_version>.md. Exactly one setup segment is accepted: no
+# deeper nesting, no leading slash, no absolute path, ".md" only, and every
+# segment goes through safe_path_segment_ok. So a written file can only land
+# inside the release directory's evidence/ folder.
 evidence_name_ok() {
-  local name="$1"
+  local name="$1" rest seg file
   case "$name" in
-    *..*|*//*) return 1 ;;
+    evidence/*) rest="${name#evidence/}" ;;
+    *) return 1 ;;
   esac
-  printf '%s' "$name" \
-    | grep -Eq '^evidence/([A-Za-z0-9_+][A-Za-z0-9._+-]*/)?[A-Za-z0-9][A-Za-z0-9._+-]*\.md$'
+  case "$rest" in
+    */*/*) return 1 ;;
+    */*) seg="${rest%%/*}"; file="${rest#*/}"; [ -n "$seg" ] || return 1 ;;
+    *) seg=""; file="$rest" ;;
+  esac
+  if [ -n "$seg" ]; then safe_path_segment_ok "$seg" || return 1; fi
+  case "$file" in *.md) ;; *) return 1 ;; esac
+  safe_path_segment_ok "$file"
 }
 
 # write_release_dir REPORT_JSON DIR: write REPORT.md, diff.json, release.json,

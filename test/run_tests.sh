@@ -265,20 +265,99 @@ case_happy_path() {
   end_case
 }
 
-case_product_name() {
-  begin_case "product_name character rule fails early with the fix wording"
+case_name_rules() {
+  begin_case "the name rules are the API's name rules, and every slug they produce is a safe folder name"
   MOCK_PORT="0"
   setup_env
   make_repos
+
+  # ---- the rules as functions, against the API's own two regular expressions.
+  # SAFE_TITLE_RE covers product_name and the environment (agent setup) name;
+  # SAFE_NAME_RE covers vendor_version.
+  ( set +u; source "$ROOT/scripts/lib.sh" >/dev/null 2>&1
+    long64="$(printf 'a%.0s' $(seq 1 64))"
+    long65="$(printf 'a%.0s' $(seq 1 65))"
+    fails=0
+    accept_title() { safe_title_ok "$1" || { echo "TITLE SHOULD ACCEPT: [$1]"; fails=1; }; }
+    refuse_title() { safe_title_ok "$1" && { echo "TITLE SHOULD REFUSE: [$1]"; fails=1; }; }
+    accept_name()  { safe_name_ok  "$1" || { echo "NAME SHOULD ACCEPT: [$1]"; fails=1; }; }
+    refuse_name()  { safe_name_ok  "$1" && { echo "NAME SHOULD REFUSE: [$1]"; fails=1; }; }
+
+    # The names #472 D6 A widened the API to accept.
+    accept_title "Production MCP"
+    accept_title "Agent SDK"
+    accept_title "Larkspur Memory"
+    accept_title "Larkspur.Memory-2+beta_1"
+    accept_title "staging-mcp"
+    accept_title "a"
+    accept_title "$long64"
+    # The names the API refuses, which the action must refuse too.
+    refuse_title "bad name!"
+    refuse_title "-leading-hyphen"
+    refuse_title " leading space"
+    refuse_title "trailing space "
+    refuse_title "double  space"
+    refuse_title "$long65"
+    refuse_title "with/slash"
+    refuse_title ""
+    # vendor_version keeps the slug rule: no spaces there.
+    accept_name "2.31.0"; accept_name "_beta"; accept_name "$long64"
+    refuse_name "Production MCP"; refuse_name "-lead"; refuse_name "$long65"; refuse_name ""
+
+    # Whatever a name may contain, the folder it produces stays one safe segment.
+    [ "$(agent_setup_slug "Production MCP")" = "production-mcp" ] || { echo "SLUG WRONG: Production MCP"; fails=1; }
+    [ "$(agent_setup_slug "Agent SDK")" = "agent-sdk" ] || { echo "SLUG WRONG: Agent SDK"; fails=1; }
+    safe_path_segment_ok "$(agent_setup_slug "Production MCP")" || { echo "SLUG NOT SAFE: production-mcp"; fails=1; }
+    for bad in "." ".." "-x" "" "a/b"; do
+      safe_path_segment_ok "$bad" && { echo "SEGMENT SHOULD REFUSE: [$bad]"; fails=1; }
+    done
+    safe_path_segment_ok "a..b" || { echo "SEGMENT SHOULD ACCEPT: a..b"; fails=1; }
+
+    # The evidence contract follows the same segment rule.
+    evidence_name_ok "evidence/production-mcp/cr1c07-1.0.0.md" || { echo "EV SHOULD ACCEPT: per-setup"; fails=1; }
+    evidence_name_ok "evidence/cr1c07-1.0.0.md" || { echo "EV SHOULD ACCEPT: flat"; fails=1; }
+    evidence_name_ok "evidence/a..b/x.md" || { echo "EV SHOULD ACCEPT: dot inside a segment"; fails=1; }
+    for bad in "evidence/../x.md" "evidence/./x.md" "evidence//x.md" "evidence/../../etc/x.md" \
+               "evidence/a/b/c.md" "/evidence/x.md" "evidence/x.txt" "evidence/-x.md" "evidence/"; do
+      evidence_name_ok "$bad" && { echo "EV SHOULD REFUSE: [$bad]"; fails=1; }
+    done
+    exit "$fails"
+  ) > "$CASE_TMP/rules.log" 2>&1
+  if [ "$?" = "0" ]; then
+    say "    ok: every name rule case agrees with the API's rules"
+  else
+    note_fail "a name rule disagrees with the API:"
+    sed 's/^/      /' "$CASE_TMP/rules.log"
+  fi
+
+  # ---- and through the step a customer's run actually executes.
+  export VERGING_PRODUCT_NAME="Larkspur Memory"
+  export VERGING_ENVIRONMENT="Production MCP"
+  run_step resolve_inputs.sh
+  check_exit "a two-word product name and agent setup are accepted" 0 "$STEP_EXIT"
+  check_eq "the environment is stored as the customer named it" "Production MCP" \
+    "$(cat "$RUNNER_TEMP/verging-memory-ci-state/environment")"
+  check_eq "the product name is stored as the customer named it" "Larkspur Memory" \
+    "$(cat "$RUNNER_TEMP/verging-memory-ci-state/product_name")"
+
   export VERGING_PRODUCT_NAME="bad name!"
   run_step resolve_inputs.sh
-  check_exit "resolve_inputs exits 1" 1 "$STEP_EXIT"
-  check_grep "error names product_name" "product_name 'bad name!' is not valid" "$CASE_TMP/run.log"
-  check_grep "error carries the fix wording" "letters, digits, dots, underscores, plus signs, and hyphens only; up to 64 characters" "$CASE_TMP/run.log"
+  check_exit "a name the API refuses is refused here first" 1 "$STEP_EXIT"
+  check_grep "the error names product_name" "product_name 'bad name!' is not valid" "$CASE_TMP/run.log"
+  check_grep "the fix wording is the API's own" "letters, digits, spaces, dots, underscores, plus signs, and hyphens only; single spaces between words, none at the start or the end" "$CASE_TMP/run.log"
 
   export VERGING_PRODUCT_NAME="Larkspur.Memory-2+beta_1"
+  export VERGING_ENVIRONMENT=".."
   run_step resolve_inputs.sh
-  check_exit "a valid product_name passes" 0 "$STEP_EXIT"
+  check_exit "an agent setup whose folder would be the parent directory is refused" 1 "$STEP_EXIT"
+  check_grep "the refusal says what it is about" "cannot name the folder its evidence files go in" "$CASE_TMP/run.log"
+
+  export VERGING_ENVIRONMENT="staging-mcp"
+  export VERGING_VENDOR_VERSION="not a version"
+  run_step resolve_inputs.sh
+  check_exit "vendor_version still refuses spaces" 1 "$STEP_EXIT"
+  check_grep "vendor_version keeps the slug fix wording" "letters, digits, dots, underscores, plus signs, and hyphens only; up to 64 characters" "$CASE_TMP/run.log"
+  unset VERGING_VENDOR_VERSION
   end_case
 }
 
@@ -663,7 +742,7 @@ say "Repository under test: $ROOT"
 export PATH="$TESTDIR/shims:$PATH"
 
 case_happy_path
-case_product_name
+case_name_rules
 case_held
 case_failed
 case_fetch_only

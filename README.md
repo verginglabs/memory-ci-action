@@ -52,13 +52,13 @@ The action needs a checkout (it commits the report into your repository), but it
 | Input | Required | Default | What it is |
 |---|---|---|---|
 | `api_key` | yes | | Your Verging Memory CI API key, from a repository secret. |
-| `environment` | yes | | The name of the environment to test in, as you named it at onboarding or via `POST /v1/environments`. |
+| `environment` | yes | | The name of the environment to test in, as you named it at onboarding or via `POST /v1/environments`. Letters, digits, spaces, dots, underscores, plus signs, and hyphens only; single spaces between words, none at the start or the end; up to 64 characters; must not start with a hyphen. Names with spaces, such as `Production MCP`, are names, not errors. |
 | `suites` | no | `core-recall,preference-adherence,truth-maintenance` | Comma separated test suite values. Pass an empty string for Full Coverage (every test suite). |
 | `vendor_version` | no | the `VERSION` file at the repository root, else the short commit SHA | The identifier of the release to test. Letters, digits, dots, underscores, plus signs, and hyphens only; up to 64 characters; must not start with a hyphen. |
 | `endpoint` | no | `cfg:standing` | Your staging endpoint, or the standing configuration reference agreed at onboarding. The default means "use the standing configuration on file for my account". |
 | `api_base` | no | `https://ci.verginglabs.com` | Base URL of the Verging Memory CI API. |
 | `folder` | no | `Verging Memory CI` | Name of the report folder at the repository root. |
-| `product_name` | no | the name agreed at onboarding | Your product's name as it should appear on the report. Same character rule as `vendor_version`; a bad value fails the run before anything is submitted. |
+| `product_name` | no | the name agreed at onboarding | Your product's name as it should appear on the report. Same character rule as `environment`, spaces included; a bad value fails the run before anything is submitted. |
 | `fetch_only_release_id` | no | | Fetch and commit an existing release's report without submitting anything. See Recovery below. |
 | `poll_timeout_minutes` | no | `45` | How many minutes to wait for the report before giving up. |
 

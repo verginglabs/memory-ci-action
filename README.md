@@ -40,6 +40,7 @@ jobs:
         with:
           api_key: ${{ secrets.VERGING_API_KEY }}
           environment: "Production MCP"
+          product_name: "Acme Recall"
           suites: core-recall,preference-adherence,truth-maintenance
           fetch_only_release_id: ${{ inputs.fetch_only_release_id }}
 ```

@@ -12,6 +12,18 @@ if [ -z "${VERGING_ENVIRONMENT:-}" ]; then
   echo "::error::the environment input is empty; name the environment to test in, as you named it at onboarding"
   exit 1
 fi
+# The environment (agent setup) name follows the API's display-name rule, so
+# "Production MCP" is a name, not an error. It also becomes a directory in the
+# report folder, so the slug it produces is checked here rather than after a
+# report has already been built around it.
+if ! safe_title_ok "$VERGING_ENVIRONMENT"; then
+  echo "::error::environment '$VERGING_ENVIRONMENT' is not valid. Fix: use letters, digits, spaces, dots, underscores, plus signs, and hyphens only; single spaces between words, none at the start or the end; up to 64 characters; it must not start with a hyphen."
+  exit 1
+fi
+if ! safe_path_segment_ok "$(agent_setup_slug "$VERGING_ENVIRONMENT")"; then
+  echo "::error::environment '$VERGING_ENVIRONMENT' cannot name the folder its evidence files go in. Fix: give the agent setup a name that is not '.' or '..'."
+  exit 1
+fi
 
 state_set api_base "${VERGING_API_BASE:-https://ci.verginglabs.com}"
 state_set folder "${VERGING_FOLDER:-Verging Memory CI}"
@@ -26,13 +38,14 @@ if ! printf '%s' "$timeout" | grep -Eq '^[0-9]+$'; then
 fi
 state_set poll_timeout_minutes "$timeout"
 
-# product_name: same character rule as vendor_version, checked here so a bad
-# value fails before anything is submitted, with the same fix wording the
-# API answers with.
+# product_name: the API's display-name rule, the same one the environment
+# name follows, checked here so a bad value fails before anything is
+# submitted, with the same fix wording the API answers with. It titles the
+# report and never becomes a path, so spaces are fine in it.
 product_name="${VERGING_PRODUCT_NAME:-}"
 if [ -n "$product_name" ]; then
-  if ! printf '%s' "$product_name" | grep -Eq '^[A-Za-z0-9._+][A-Za-z0-9._+-]{0,63}$'; then
-    echo "::error::product_name '$product_name' is not valid. Fix: use letters, digits, dots, underscores, plus signs, and hyphens only; up to 64 characters; it must not start with a hyphen."
+  if ! safe_title_ok "$product_name"; then
+    echo "::error::product_name '$product_name' is not valid. Fix: use letters, digits, spaces, dots, underscores, plus signs, and hyphens only; single spaces between words, none at the start or the end; up to 64 characters; it must not start with a hyphen."
     exit 1
   fi
 fi
@@ -80,7 +93,9 @@ if [ -z "$v" ]; then
   echo "::error::no vendor_version: pass the vendor_version input, keep a VERSION file at the repository root, or run with a checked-out commit"
   exit 1
 fi
-if ! printf '%s' "$v" | grep -Eq '^[A-Za-z0-9._+][A-Za-z0-9._+-]{0,63}$'; then
+# vendor_version keeps the API's SLUG rule (no spaces): it names the
+# delivered evidence files, so it is a path segment.
+if ! safe_name_ok "$v" || ! safe_path_segment_ok "$v"; then
   echo "::error::vendor_version '$v' is not valid. Fix: use letters, digits, dots, underscores, plus signs, and hyphens only; up to 64 characters; it must not start with a hyphen."
   exit 1
 fi

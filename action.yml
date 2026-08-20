@@ -10,7 +10,7 @@ inputs:
     description: "Your Verging Memory CI API key, issued at onboarding. Pass it from a repository secret."
     required: true
   environment:
-    description: "The name of the environment to test in, as you named it at onboarding or via POST /v1/environments."
+    description: "The name of the environment to test in, as you named it at onboarding or via POST /v1/environments. Letters, digits, spaces, dots, underscores, plus signs, and hyphens only; single spaces between words, none at the start or the end; up to 64 characters; must not start with a hyphen."
     required: true
   suites:
     description: "Comma separated test suite values, e.g. core-recall,truth-maintenance. Pass an empty string for Full Coverage (every test suite)."
@@ -33,7 +33,7 @@ inputs:
     required: false
     default: "Verging Memory CI"
   product_name:
-    description: "Your product's name as it should appear on the report. Letters, digits, dots, underscores, plus signs, and hyphens only; up to 64 characters; must not start with a hyphen."
+    description: "Your product's name as it should appear on the report. Letters, digits, spaces, dots, underscores, plus signs, and hyphens only; single spaces between words, none at the start or the end; up to 64 characters; must not start with a hyphen."
     required: false
     default: ""
   fetch_only_release_id:

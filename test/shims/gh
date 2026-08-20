@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Test stand-in for the gh CLI. Records every invocation to $GH_SHIM_LOG and
+# answers canned output from the environment.
+log="${GH_SHIM_LOG:?GH_SHIM_LOG is not set}"
+{
+  printf 'gh'
+  for a in "$@"; do printf ' %q' "$a"; done
+  printf '\n'
+} >> "$log"
+if [ "${GH_SHIM_FAIL:-0}" = "1" ]; then
+  exit 1
+fi
+case "${1:-}" in
+  pr)
+    case "${2:-}" in
+      list) printf '%s\n' "${GH_PR_LIST_OUTPUT:-}" ;;
+      create) echo "https://github.com/example/example/pull/1" ;;
+    esac
+    ;;
+  api)
+    joined="$*"
+    case "$joined" in
+      *issues/*/comments*--paginate*) printf '%s\n' "${GH_COMMENTS_OUTPUT:-}" ;;
+      *) echo '{}' ;;
+    esac
+    ;;
+  *)
+    echo '{}'
+    ;;
+esac
+exit 0

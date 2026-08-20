@@ -1,0 +1,17 @@
+name: tests
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Run the test harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the tests
+        run: test/run_tests.sh

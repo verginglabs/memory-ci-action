@@ -10,6 +10,17 @@ Reads its script from $MOCK_DIR/scenario.json:
   report         the body for GET /v1/releases/{id}/report
   report_by_id   optional map of release id to its own report body
 
+A report body carries its evidence files the way the API does: an
+`evidence` list of {name, content} rows. The names come in the two shapes
+the API emits, and the fixtures here serve both, so the action's evidence
+writer is exercised rather than assumed:
+
+  evidence/<test-id>-<version>.md                 one agent setup
+  evidence/<agent-setup>/<test-id>-<version>.md   several agent setups
+
+The fixtures also serve names the API never emits (a traversal attempt, a
+deeper path, an absolute path) so the refusal path is exercised too.
+
 Every request is appended to $MOCK_DIR/requests.log as one JSON line.
 The chosen port is written to $MOCK_DIR/port.
 """

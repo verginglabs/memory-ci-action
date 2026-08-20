@@ -1,0 +1,107 @@
+name: "Verging Memory CI"
+description: "Submits a release of your memory product to Verging Memory CI, waits for the regression report, and commits the report into your repository."
+author: "Verging Labs"
+branding:
+  icon: "check-circle"
+  color: "purple"
+
+inputs:
+  api_key:
+    description: "Your Verging Memory CI API key, issued at onboarding. Pass it from a repository secret."
+    required: true
+  environment:
+    description: "The name of the environment to test in, as you named it at onboarding or via POST /v1/environments."
+    required: true
+  suites:
+    description: "Comma separated test suite values, e.g. core-recall,truth-maintenance. Pass an empty string for Full Coverage (every test suite)."
+    required: false
+    default: "core-recall,preference-adherence,truth-maintenance"
+  vendor_version:
+    description: "The identifier of the release to test. Default: the VERSION file at the repository root, else the short commit SHA."
+    required: false
+    default: ""
+  endpoint:
+    description: "Your staging endpoint, or the standing configuration reference agreed at onboarding."
+    required: false
+    default: "cfg:standing"
+  api_base:
+    description: "Base URL of the Verging Memory CI API."
+    required: false
+    default: "https://ci.verginglabs.com"
+  folder:
+    description: "Name of the report folder at the repository root."
+    required: false
+    default: "Verging Memory CI"
+  product_name:
+    description: "Your product's name as it should appear on the report. Letters, digits, dots, underscores, plus signs, and hyphens only; up to 64 characters; must not start with a hyphen."
+    required: false
+    default: ""
+  fetch_only_release_id:
+    description: "Fetch and commit the report of this existing release id without submitting anything. Use it to recover a run that failed after submitting; the id is in that run's log."
+    required: false
+    default: ""
+  poll_timeout_minutes:
+    description: "How many minutes to wait for the report before giving up."
+    required: false
+    default: "45"
+
+outputs:
+  release_id:
+    description: "The id of the release whose report this run fetched."
+    value: ${{ steps.finish.outputs.release_id }}
+  verdict:
+    description: "The Release verdict from the report header: Ready, or Not ready with the reason."
+    value: ${{ steps.finish.outputs.verdict }}
+  report_path:
+    description: "Repository relative path of the committed REPORT.md for this release."
+    value: ${{ steps.finish.outputs.report_path }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Resolve inputs
+      shell: bash
+      env:
+        VERGING_API_KEY: ${{ inputs.api_key }}
+        VERGING_ENVIRONMENT: ${{ inputs.environment }}
+        VERGING_SUITES: ${{ inputs.suites }}
+        VERGING_VENDOR_VERSION: ${{ inputs.vendor_version }}
+        VERGING_ENDPOINT: ${{ inputs.endpoint }}
+        VERGING_API_BASE: ${{ inputs.api_base }}
+        VERGING_FOLDER: ${{ inputs.folder }}
+        VERGING_PRODUCT_NAME: ${{ inputs.product_name }}
+        VERGING_FETCH_ONLY_RELEASE_ID: ${{ inputs.fetch_only_release_id }}
+        VERGING_POLL_TIMEOUT_MINUTES: ${{ inputs.poll_timeout_minutes }}
+      run: '"$GITHUB_ACTION_PATH/scripts/resolve_inputs.sh"'
+
+    - name: Reconcile earlier reports
+      shell: bash
+      env:
+        VERGING_API_KEY: ${{ inputs.api_key }}
+        VERGING_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        GH_TOKEN: ${{ github.token }}
+      run: '"$GITHUB_ACTION_PATH/scripts/reconcile.sh"'
+
+    - name: Submit the release and collect the report
+      shell: bash
+      env:
+        VERGING_API_KEY: ${{ inputs.api_key }}
+      run: '"$GITHUB_ACTION_PATH/scripts/run_release.sh"'
+
+    - name: Commit and push the report
+      shell: bash
+      env:
+        VERGING_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        GH_TOKEN: ${{ github.token }}
+      run: '"$GITHUB_ACTION_PATH/scripts/commit_push.sh"'
+
+    - name: Post the check and the pull request comment
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: '"$GITHUB_ACTION_PATH/scripts/surfaces.sh"'
+
+    - name: Set outputs
+      id: finish
+      shell: bash
+      run: '"$GITHUB_ACTION_PATH/scripts/set_outputs.sh"'

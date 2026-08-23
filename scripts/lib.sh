@@ -396,6 +396,196 @@ fetch_and_write() {
   return 0
 }
 
+# apply_final_report REL_DIR REPORT_JSON: rewrite an existing release
+# directory in place from a fetched FINAL report body (git history keeps the
+# preliminary report), update the release's index row to stage final, and
+# refresh latest/ when this release is the newest one on record. Sets
+# APPLIED_ID, APPLIED_VERSION, APPLIED_VERDICT, APPLIED_PATH for the caller.
+# Returns 1, with the directory possibly half rewritten, when the body
+# cannot be written; the caller restores the directory.
+apply_final_report() {
+  local rel="$1" report="$2" folder id version slug release_date verdict
+  folder="$(state_get folder)"
+  id="$(jq -r '.release_id // empty' "$rel/release.json")"
+  version="$(jq -r '.vendor_version // "not recorded"' "$rel/release.json")"
+  write_release_dir "$report" "$rel" || return 1
+  verdict="$(extract_verdict "$report" "$rel/REPORT.md")"
+
+  slug="$(basename "$rel")"
+  case "$slug" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*)
+      release_date="$(printf '%s' "$slug" | cut -c1-10)"
+      ;;
+    *)
+      release_date="$(grep -F "[$id](" "$folder/releases/index.md" 2>/dev/null | head -n 1 \
+        | awk -F'|' '{gsub(/^ +| +$/, "", $2); print $2}')"
+      ;;
+  esac
+  [ -n "$release_date" ] || release_date="$(date -u +%Y-%m-%d)"
+  index_update_row "$folder" "$id" \
+    "| $release_date | $version | [$id]($slug/REPORT.md) | $verdict | final |"
+
+  # latest/ is refreshed only when this release is the newest one on record.
+  if [ "$(jq -r '.release_id // empty' "$folder/latest/release.json" 2>/dev/null)" = "$id" ]; then
+    refresh_latest "$folder" "$rel"
+  fi
+
+  APPLIED_ID="$id"
+  APPLIED_VERSION="$version"
+  APPLIED_VERDICT="$verdict"
+  APPLIED_PATH="$rel/REPORT.md"
+  return 0
+}
+
+# sync_finals_pass POST_SURFACES: the finals sync. The repository is the
+# source of what needs syncing: every release directory whose committed
+# diff.json is stage "preliminary" is a release still awaiting its final
+# report. Each one's status is asked for with the customer key; the ones
+# whose status is "corrected" have their final report fetched and the
+# release directory replaced in place, latest/ and the index updated exactly
+# as the preliminary path does. One commit carries the whole pass, pushed
+# with the same fallback the release path uses. A release in any other state
+# is left alone, and a final report on disk is never replaced by anything.
+#
+# Runs on every job: first thing in release mode (an active customer gets
+# every final report with zero extra configuration), and as the whole job in
+# sync mode. With POST_SURFACES=1 (sync mode) it also posts one commit
+# status per synced release on the sync commit, and writes the job summary.
+sync_finals_pass() {
+  local post_surfaces="${1:-0}"
+  local folder releases_dir rel stage id version code status new_stage
+  local status_file report awaiting synced message repo head_sha conclusion i
+  folder="$(state_get folder)"
+  releases_dir="$folder/releases"
+
+  if [ ! -d "$releases_dir" ]; then
+    echo "Nothing to sync ($releases_dir does not exist yet)."
+    return 0
+  fi
+  if [ -f "$releases_dir/index.md" ]; then
+    echo "Releases on record in $releases_dir/index.md:"
+    grep -E '^\| [0-9]' "$releases_dir/index.md" || echo "  (none yet)"
+  fi
+
+  awaiting=0
+  synced=0
+  local -a synced_ids=() synced_versions=() synced_verdicts=() synced_paths=() synced_labels=()
+  for rel in "$releases_dir"/*/; do
+    rel="${rel%/}"
+    [ -f "$rel/release.json" ] || continue
+    [ -f "$rel/diff.json" ] || continue
+    stage="$(jq -r '.stage // empty' "$rel/diff.json")"
+    [ "$stage" = "preliminary" ] || continue
+    id="$(jq -r '.release_id // empty' "$rel/release.json")"
+    [ -n "$id" ] || continue
+    version="$(jq -r '.vendor_version // "not recorded"' "$rel/release.json")"
+    awaiting=$((awaiting + 1))
+    echo "Release $id ($version) is on its preliminary report; asking whether the final report is out"
+
+    status_file="$(state_dir)/sync-status.json"
+    code="$(api_get "/v1/releases/$id" "$status_file")"
+    if [ "$code" != "200" ]; then
+      echo "::warning::GET /v1/releases/$id returned HTTP $code; leaving the preliminary report in place"
+      print_error_body "$status_file"
+      continue
+    fi
+    status="$(jq -r '.status // "unknown"' "$status_file")"
+    if [ "$status" != "corrected" ]; then
+      echo "The final report for $id ($version) is not out yet (status: $status); leaving the preliminary report in place."
+      continue
+    fi
+
+    report="$(state_dir)/sync-report.json"
+    code="$(api_get "/v1/releases/$id/report" "$report")"
+    if [ "$code" != "200" ]; then
+      echo "::warning::GET /v1/releases/$id/report returned HTTP $code; leaving the preliminary report in place"
+      print_error_body "$report"
+      continue
+    fi
+    new_stage="$(jq -r '.diff.stage // empty' "$report")"
+    if [ "$new_stage" != "final" ]; then
+      echo "::warning::release $id reads corrected but the fetched report is not the final report (stage: ${new_stage:-not recorded}); leaving the preliminary report in place"
+      continue
+    fi
+
+    if ! apply_final_report "$rel" "$report"; then
+      echo "::warning::could not rewrite $rel from the fetched final report; leaving it as it was"
+      git checkout -- "$rel" 2>/dev/null || true
+      git clean -qfd -- "$rel" 2>/dev/null || true
+      continue
+    fi
+    echo "Final report for $APPLIED_VERSION ($APPLIED_ID): $APPLIED_VERDICT"
+    synced=$((synced + 1))
+    synced_ids+=("$APPLIED_ID")
+    synced_versions+=("$APPLIED_VERSION")
+    synced_verdicts+=("$APPLIED_VERDICT")
+    synced_paths+=("$APPLIED_PATH")
+    synced_labels+=("$APPLIED_VERSION ($APPLIED_ID)")
+    state_set release_id "$APPLIED_ID"
+    state_set vendor_version "$APPLIED_VERSION"
+    state_set verdict "$APPLIED_VERDICT"
+    state_set report_path "$APPLIED_PATH"
+  done
+
+  if [ "$synced" -eq 0 ]; then
+    if [ "$awaiting" -eq 0 ]; then
+      echo "Nothing to sync; every report on record is already final."
+    else
+      echo "Nothing to commit; $awaiting release(s) still await their final report."
+    fi
+    return 0
+  fi
+
+  git_config_identity
+  git add "$folder"
+  if git diff --cached --quiet; then
+    echo "Nothing to commit; the folder already carries these final reports."
+    return 0
+  fi
+  if [ "$synced" -eq 1 ]; then
+    message="Verging Memory CI: final report for ${synced_labels[0]}"
+  else
+    message="Verging Memory CI: final reports for $(printf '%s, ' "${synced_labels[@]}" | sed 's/, $//')"
+  fi
+  git commit -m "$message"
+  echo "Committed: $message"
+  push_with_fallback
+
+  if [ "$post_surfaces" = "1" ]; then
+    repo="${GITHUB_REPOSITORY:-}"
+    head_sha="$(git rev-parse HEAD 2>/dev/null || true)"
+    i=0
+    while [ "$i" -lt "$synced" ]; do
+      conclusion="neutral"
+      case "${synced_verdicts[$i]}" in Ready*) conclusion="success" ;; esac
+      if [ -n "$repo" ] && [ -n "$head_sha" ]; then
+        if gh api "repos/$repo/check-runs" -X POST \
+            -f name="Verging Memory CI" \
+            -f head_sha="$head_sha" \
+            -f status="completed" \
+            -f conclusion="$conclusion" \
+            -f "output[title]=final report for ${synced_versions[$i]}" \
+            -f "output[summary]=Release \`${synced_ids[$i]}\`. Report: \`${synced_paths[$i]}\`." \
+            >/dev/null 2>&1; then
+          echo "Posted the commit status for the final report for ${synced_versions[$i]} (conclusion: $conclusion)."
+        else
+          echo "::warning::could not post the commit status for ${synced_labels[$i]}; the committed report is unaffected."
+        fi
+      else
+        echo "::warning::missing repository or commit context; skipping the commit status for ${synced_labels[$i]}."
+      fi
+      {
+        echo "### Final report for ${synced_versions[$i]}: ${synced_verdicts[$i]}"
+        echo
+        echo "Release \`${synced_ids[$i]}\`. Report: \`${synced_paths[$i]}\`"
+        echo
+      } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+      i=$((i + 1))
+    done
+  fi
+  return 0
+}
+
 # push_with_fallback: push HEAD to the triggering branch with a fetch and
 # rebase retry. If the push still fails, the job does NOT fail: the same
 # commit is delivered on the branch verging-memory-ci/reports with a pull

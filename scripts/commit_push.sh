@@ -6,6 +6,11 @@
 set -euo pipefail
 source "${GITHUB_ACTION_PATH:?GITHUB_ACTION_PATH is not set}/scripts/lib.sh"
 
+if [ "$(state_get mode)" = "sync" ]; then
+  echo "mode is sync; the sync step already committed what there was to commit."
+  exit 0
+fi
+
 folder="$(state_get folder)"
 vendor_version="$(state_get vendor_version)"
 release_id="$(state_get release_id)"

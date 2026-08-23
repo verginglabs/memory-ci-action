@@ -9,6 +9,11 @@
 set -uo pipefail
 source "${GITHUB_ACTION_PATH:?GITHUB_ACTION_PATH is not set}/scripts/lib.sh"
 
+if [ "$(state_get mode)" = "sync" ]; then
+  echo "mode is sync; the sync step posts its own commit status per synced release."
+  exit 0
+fi
+
 verdict="$(state_get verdict)"
 release_id="$(state_get release_id)"
 report_path="$(state_get report_path)"

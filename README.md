@@ -49,6 +49,42 @@ Set the repository secret `VERGING_API_KEY` to the API key issued at onboarding,
 
 That is the whole install.
 
+## The final report
+
+The final report replaces the preliminary report in your repository when it
+is ready. Automatic: your next job commits it before submitting anything.
+On demand and on a schedule: this second workflow.
+
+Add this second workflow file next to the first, with the same `VERGING_API_KEY` secret; it needs no environment and no version, because the folder itself says which final reports are awaited:
+
+```yaml
+name: Verging Memory CI sync
+on:
+  workflow_dispatch: {}
+  # Optional: also collect the final reports between releases, every 3 hours.
+  schedule:
+    - cron: "17 */3 * * *"
+permissions:
+  contents: write
+  checks: write
+  pull-requests: write
+concurrency:
+  group: verging-memory-ci-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  sync-finals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: "Verging Memory CI"
+          sparse-checkout-cone-mode: true
+      - uses: verginglabs/memory-ci-action@v1
+        with:
+          api_key: ${{ secrets.VERGING_API_KEY }}
+          mode: sync
+```
+
 ## Everything else
 
 The integration guide is the one place the contract lives: what each input

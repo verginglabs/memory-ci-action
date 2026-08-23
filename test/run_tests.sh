@@ -46,6 +46,10 @@ check_dirs_equal() { # desc dir1 dir2
   if diff -r "$2" "$3" >/dev/null 2>&1; then say "    ok: $1"; else note_fail "$1 ($2 and $3 differ)"; fi
 }
 
+dir_digest() { # one digest over a directory's file names and contents
+  (cd "$1" && find . -type f | sort | xargs sha256sum) | sha256sum | cut -d' ' -f1
+}
+
 # ---------- case plumbing ----------
 
 begin_case() {
@@ -126,6 +130,7 @@ setup_env() {
   export VERGING_SUITES="core-recall,preference-adherence,truth-maintenance"
   unset VERGING_VENDOR_VERSION VERGING_ENDPOINT VERGING_FOLDER 2>/dev/null
   unset VERGING_PRODUCT_NAME VERGING_FETCH_ONLY_RELEASE_ID VERGING_POLL_TIMEOUT_MINUTES 2>/dev/null
+  unset VERGING_MODE 2>/dev/null
   unset VERGING_DEFAULT_BRANCH GH_PR_LIST_OUTPUT GH_COMMENTS_OUTPUT GH_SHIM_FAIL 2>/dev/null
 }
 
@@ -207,10 +212,15 @@ case_happy_path() {
 
   run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
   run_step reconcile.sh;       check_exit "reconcile exits 0" 0 "$STEP_EXIT"
+  run_step sync_finals.sh;     check_exit "sync_finals exits 0" 0 "$STEP_EXIT"
   run_step run_release.sh;     check_exit "run_release exits 0" 0 "$STEP_EXIT"
   run_step commit_push.sh;     check_exit "commit_push exits 0" 0 "$STEP_EXIT"
   run_step surfaces.sh;        check_exit "surfaces exits 0" 0 "$STEP_EXIT"
   run_step set_outputs.sh;     check_exit "set_outputs exits 0" 0 "$STEP_EXIT"
+
+  check_grep "the finals sync ran first and found nothing pending" "Nothing to sync (Verging Memory CI/releases does not exist yet)." "$CASE_TMP/run.log"
+  check_grep "the sync step defers to the reconcile pass in release mode" "mode is release; the finals sync already happened at the start of this job." "$CASE_TMP/run.log"
+  check_eq "exactly one commit landed beyond the initial one" "2" "$(git -C "$ORIGIN" rev-list --count main)"
 
   local dir="$WORKSPACE/$FOLDER/releases/2026-08-15-2.31.0"
   check_file "REPORT.md written" "$dir/REPORT.md"
@@ -484,6 +494,10 @@ case_reconcile() {
   local md scenario
   md="$(make_report_md "Larkspur 2.30.0" "Ready" "Final report")"
   scenario="$(jq -n --arg md "$md" --arg rid "$rid" '{
+    status_by_id: {($rid): [
+      {release_id: $rid, status: "corrected", vendor_version: "2.30.0",
+       corrections_due_by: "2026-08-17"}
+    ]},
     report_by_id: {($rid): {
       release_id: $rid, status: "corrected", vendor_version: "2.30.0",
       scope: {suites: ["core-recall"]}, corrections_due_by: "2026-08-17",
@@ -513,6 +527,274 @@ case_reconcile() {
   check_eq "the reconcile commit message" \
     "Verging Memory CI: final report for 2.30.0 ($rid)" \
     "$(git -C "$ORIGIN" log -1 --format=%s main)"
+  end_case
+}
+
+# seed_release_dir RID DATE VERSION STAGE VERDICT: seed one committed-shape
+# release directory with an index row, one evidence file, and latest/ as a
+# copy of it. Seed oldest first so latest/ ends on the newest. Commit with
+# seed_commit_push when done.
+seed_release_dir() {
+  local rid="$1" date="$2" version="$3" stage="$4" verdict="$5"
+  local dir="$WORKSPACE/$FOLDER/releases/$date-$version"
+  local stage_words="Final report" release_verdict="ready"
+  if [ "$stage" = "preliminary" ]; then
+    stage_words="Preliminary report (the final report follows by next business day)"
+  fi
+  case "$verdict" in Ready*) release_verdict="ready" ;; *) release_verdict="not_ready" ;; esac
+  mkdir -p "$dir/evidence"
+  make_report_md "Larkspur $version" "$verdict" "$stage_words" > "$dir/REPORT.md"
+  jq -n --arg rid "$rid" --arg stage "$stage" --arg rv "$release_verdict" \
+    '{format: "release-diff/v1", verdict: "pass", cost_verdict: "pass",
+      release_verdict: $rv, stage: $stage, release_id: $rid}' > "$dir/diff.json"
+  jq -n --arg rid "$rid" --arg v "$version" '{release_id: $rid, vendor_version: $v,
+    scope: {suites: ["core-recall"]}, corrections_due_by: "2026-08-17"}' > "$dir/release.json"
+  printf 'seeded evidence for %s\n' "$version" > "$dir/evidence/seed-$version.md"
+  if [ ! -f "$WORKSPACE/$FOLDER/releases/index.md" ]; then
+    {
+      echo "# Releases"
+      echo
+      echo "One line per release, oldest first. Each release id links to its report."
+      echo
+      echo "| Date (UTC) | vendor_version | Release id | Release verdict | Stage |"
+      echo "|---|---|---|---|---|"
+    } > "$WORKSPACE/$FOLDER/releases/index.md"
+  fi
+  printf '| %s | %s | [%s](%s/REPORT.md) | %s | %s |\n' \
+    "$date" "$version" "$rid" "$date-$version" "$verdict" "$stage" \
+    >> "$WORKSPACE/$FOLDER/releases/index.md"
+  rm -rf "$WORKSPACE/$FOLDER/latest"
+  mkdir -p "$WORKSPACE/$FOLDER/latest"
+  cp -R "$dir"/. "$WORKSPACE/$FOLDER/latest/"
+  cp "$ROOT/scripts/folder-readme.md" "$WORKSPACE/$FOLDER/README.md"
+}
+
+seed_commit_push() { # $1 commit message
+  (
+    cd "$WORKSPACE"
+    git add "$FOLDER"
+    git commit -qm "$1"
+    git push -q origin HEAD:main
+  )
+}
+
+case_release_syncs_pending_final() {
+  begin_case "a release-mode job syncs a pending final report first, then submits the new release"
+  local old_rid="run_20260814_aaaabbbbcccc" new_rid="run_20260815_186efbad9769"
+  local final_md scenario
+  final_md="$(make_report_md "Larkspur 2.30.0" "Ready" "Final report")"
+  scenario="$(happy_scenario "$new_rid" | jq --arg md "$final_md" --arg old "$old_rid" '
+    .status_by_id = {($old): [{release_id: $old, status: "corrected",
+      vendor_version: "2.30.0", corrections_due_by: "2026-08-17"}]} |
+    .report_by_id = {($old): {
+      release_id: $old, status: "corrected", vendor_version: "2.30.0",
+      scope: {suites: ["core-recall"]}, corrections_due_by: "2026-08-17",
+      report_markdown: $md,
+      diff: {format: "release-diff/v1", verdict: "pass", cost_verdict: "pass",
+             release_verdict: "ready", stage: "final", corrections: []},
+      evidence: []
+    }}')"
+  start_mock "$scenario" || { end_case; return; }
+  setup_env
+  make_repos
+  seed_preliminary_release "$old_rid"
+
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh;       check_exit "reconcile exits 0" 0 "$STEP_EXIT"
+  run_step sync_finals.sh;     check_exit "sync_finals exits 0" 0 "$STEP_EXIT"
+  run_step run_release.sh;     check_exit "run_release exits 0" 0 "$STEP_EXIT"
+  run_step commit_push.sh;     check_exit "commit_push exits 0" 0 "$STEP_EXIT"
+  run_step surfaces.sh;        check_exit "surfaces exits 0" 0 "$STEP_EXIT"
+  run_step set_outputs.sh;     check_exit "set_outputs exits 0" 0 "$STEP_EXIT"
+
+  check_eq "the finals sync asks before anything is submitted" "GET /v1/releases/$old_rid" \
+    "$(jq -rs '.[0] | "\(.method) \(.path)"' "$MOCK_DIR/requests.log")"
+  check_eq "exactly one release submitted" "1" "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
+
+  local old_dir="$WORKSPACE/$FOLDER/releases/2026-08-14-2.30.0"
+  local new_dir="$WORKSPACE/$FOLDER/releases/2026-08-15-2.31.0"
+  check_eq "the pending release now holds its final report" "final" "$(jq -r '.stage' "$old_dir/diff.json")"
+  check_file "the new release's preliminary report is committed too" "$new_dir/REPORT.md"
+  check_eq "origin main: the new report commit sits on top of the final-report commit" \
+    "Verging Memory CI: report for 2.31.0 ($new_rid): Ready
+Verging Memory CI: final report for 2.30.0 ($old_rid)" \
+    "$(git -C "$ORIGIN" log -2 --format=%s main)"
+  check_grep "index: the old release's row reads final" "[$old_rid](2026-08-14-2.30.0/REPORT.md) | Ready | final |" "$WORKSPACE/$FOLDER/releases/index.md"
+  check_grep "index: the new release's row reads preliminary" "[$new_rid](2026-08-15-2.31.0/REPORT.md) | Ready | preliminary" "$WORKSPACE/$FOLDER/releases/index.md"
+  check_dirs_equal "latest/ is the new release" "$new_dir" "$WORKSPACE/$FOLDER/latest"
+  check_grep "output release_id is the new release" "release_id=$new_rid" "$GITHUB_OUTPUT"
+  end_case
+}
+
+case_sync_finals() {
+  begin_case "sync mode replaces a preliminary report with the final report, in one commit, and submits nothing"
+  local rid="run_20260814_aaaabbbbcccc"
+  local md scenario
+  md="$(make_report_md "Larkspur 2.30.0" "Ready" "Final report")"
+  scenario="$(jq -n --arg md "$md" --arg rid "$rid" '{
+    status_by_id: {($rid): [
+      {release_id: $rid, status: "corrected", vendor_version: "2.30.0",
+       received_at: "2026-08-14T09:00:00.000Z", corrections_due_by: "2026-08-17"}
+    ]},
+    report_by_id: {($rid): {
+      release_id: $rid, status: "corrected", vendor_version: "2.30.0",
+      scope: {suites: ["core-recall"]}, corrections_due_by: "2026-08-17",
+      report_markdown: $md,
+      diff: {format: "release-diff/v1", verdict: "pass", cost_verdict: "pass",
+             release_verdict: "ready", stage: "final",
+             corrections: [{test: "core-recall-1", from: "fail", to: "pass"}]},
+      evidence: [{name: "evidence/tm1c02-2.30.0.md", content: "final evidence file"}]
+    }}
+  }')"
+  start_mock "$scenario" || { end_case; return; }
+  setup_env
+  make_repos
+  seed_preliminary_release "$rid"
+  local before after
+  before="$(git -C "$ORIGIN" rev-list --count main)"
+  export VERGING_MODE="sync"
+  unset VERGING_ENVIRONMENT
+
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0 without an environment" 0 "$STEP_EXIT"
+  run_step reconcile.sh;       check_exit "reconcile exits 0" 0 "$STEP_EXIT"
+  run_step sync_finals.sh;     check_exit "sync_finals exits 0" 0 "$STEP_EXIT"
+  run_step run_release.sh;     check_exit "run_release exits 0" 0 "$STEP_EXIT"
+  run_step commit_push.sh;     check_exit "commit_push exits 0" 0 "$STEP_EXIT"
+  run_step surfaces.sh;        check_exit "surfaces exits 0" 0 "$STEP_EXIT"
+  run_step set_outputs.sh;     check_exit "set_outputs exits 0" 0 "$STEP_EXIT"
+
+  check_grep "resolve says nothing is submitted in sync mode" "mode is sync: nothing is submitted" "$CASE_TMP/run.log"
+  check_grep "reconcile defers to the sync step" "mode is sync; the sync step collects the final reports" "$CASE_TMP/run.log"
+  check_grep "run_release submits nothing" "mode is sync; nothing is submitted on this job." "$CASE_TMP/run.log"
+  check_grep "commit_push defers to the sync commit" "mode is sync; the sync step already committed" "$CASE_TMP/run.log"
+  check_grep "surfaces defers to the sync commit statuses" "mode is sync; the sync step posts its own commit status" "$CASE_TMP/run.log"
+  check_eq "nothing was submitted" "0" "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
+
+  local dir="$WORKSPACE/$FOLDER/releases/2026-08-14-2.30.0"
+  check_eq "the release directory now holds the final report" "final" "$(jq -r '.stage' "$dir/diff.json")"
+  check_grep "REPORT.md rewritten with the final verdict" "| **Release verdict** | Ready |" "$dir/REPORT.md"
+  check_no_path "the preliminary evidence file is gone" "$dir/evidence/core-recall-1.md"
+  check_file "the final evidence file is in place" "$dir/evidence/tm1c02-2.30.0.md"
+  check_eq "the evidence set is exactly the final report's" "1" "$(find "$dir/evidence" -type f | wc -l | tr -d ' ')"
+  check_dirs_equal "latest/ is the final release directory" "$dir" "$WORKSPACE/$FOLDER/latest"
+  check_grep "index row updated to final" "[$rid](2026-08-14-2.30.0/REPORT.md) | Ready | final |" "$WORKSPACE/$FOLDER/releases/index.md"
+  check_no_grep "index row no longer says preliminary" "preliminary" "$WORKSPACE/$FOLDER/releases/index.md"
+  after="$(git -C "$ORIGIN" rev-list --count main)"
+  check_eq "one commit for the whole sync" "$((before + 1))" "$after"
+  check_eq "the sync commit message" \
+    "Verging Memory CI: final report for 2.30.0 ($rid)" \
+    "$(git -C "$ORIGIN" log -1 --format=%s main)"
+  check_grep "a commit status was posted" "check-runs" "$GH_SHIM_LOG"
+  check_grep "the commit status concludes success for Ready" "conclusion=success" "$GH_SHIM_LOG"
+  check_grep "the commit status is titled with the final report" 'title\]=final\ report\ for\ 2.30.0' "$GH_SHIM_LOG"
+  check_grep "output release_id" "release_id=$rid" "$GITHUB_OUTPUT"
+  check_grep "output verdict" "verdict=Ready" "$GITHUB_OUTPUT"
+  check_grep "output report_path" "report_path=$FOLDER/releases/2026-08-14-2.30.0/REPORT.md" "$GITHUB_OUTPUT"
+  end_case
+}
+
+case_sync_noop() {
+  begin_case "sync mode is a clean no-op when every report is final, and refuses inputs that make no sense"
+  start_mock '{}' || { end_case; return; }
+  setup_env
+  make_repos
+  local rid="run_20260813_ddeeff001122"
+  seed_release_dir "$rid" 2026-08-13 2.29.5 final "Ready"
+  seed_commit_push "seed one final release"
+  local before after
+  before="$(git -C "$ORIGIN" rev-list --count main)"
+  export VERGING_MODE="sync"
+  unset VERGING_ENVIRONMENT
+
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh;       check_exit "reconcile exits 0" 0 "$STEP_EXIT"
+  run_step sync_finals.sh;     check_exit "sync_finals exits 0" 0 "$STEP_EXIT"
+  run_step run_release.sh;     check_exit "run_release exits 0" 0 "$STEP_EXIT"
+  run_step commit_push.sh;     check_exit "commit_push exits 0" 0 "$STEP_EXIT"
+  run_step surfaces.sh;        check_exit "surfaces exits 0" 0 "$STEP_EXIT"
+  run_step set_outputs.sh;     check_exit "set_outputs exits 0" 0 "$STEP_EXIT"
+
+  check_grep "the log says there is nothing to sync" "Nothing to sync; every report on record is already final." "$CASE_TMP/run.log"
+  after="$(git -C "$ORIGIN" rev-list --count main)"
+  check_eq "no commit was made" "$before" "$after"
+  check_eq "no API request was made" "0" "$(jq -rs 'length' "$MOCK_DIR/requests.log")"
+  check_eq "no commit status was posted" "0" "$(grep -c 'check-runs' "$GH_SHIM_LOG")"
+  check_eq "the final report on disk is untouched" "final" "$(jq -r '.stage' "$WORKSPACE/$FOLDER/releases/2026-08-13-2.29.5/diff.json")"
+
+  export VERGING_MODE="banana"
+  run_step resolve_inputs.sh
+  check_exit "an unknown mode is refused" 1 "$STEP_EXIT"
+  check_grep "the refusal names the two modes" 'use "release" to submit a release, or "sync"' "$CASE_TMP/run.log"
+  export VERGING_MODE="sync"
+  export VERGING_FETCH_ONLY_RELEASE_ID="$rid"
+  run_step resolve_inputs.sh
+  check_exit "fetch_only_release_id with mode sync is refused" 1 "$STEP_EXIT"
+  check_grep "the refusal says which mode fetches one release" 'use mode "release" with fetch_only_release_id' "$CASE_TMP/run.log"
+  unset VERGING_FETCH_ONLY_RELEASE_ID
+  end_case
+}
+
+case_sync_mixed() {
+  begin_case "sync mode in a mixed folder touches only the corrected release"
+  local rid_a="run_20260812_aaaa11112222" rid_b="run_20260813_bbbb33334444" rid_c="run_20260814_cccc55556666"
+  local md scenario
+  md="$(make_report_md "Larkspur 2.29.0" "Ready" "Final report")"
+  scenario="$(jq -n --arg md "$md" --arg a "$rid_a" --arg c "$rid_c" '{
+    status_by_id: {
+      ($a): [{release_id: $a, status: "corrected", vendor_version: "2.29.0",
+              corrections_due_by: "2026-08-15"}],
+      ($c): [{release_id: $c, status: "report_ready", vendor_version: "2.30.0",
+              corrections_due_by: "2026-08-17"}]
+    },
+    report_by_id: {($a): {
+      release_id: $a, status: "corrected", vendor_version: "2.29.0",
+      scope: {suites: ["core-recall"]}, corrections_due_by: "2026-08-15",
+      report_markdown: $md,
+      diff: {format: "release-diff/v1", verdict: "pass", cost_verdict: "pass",
+             release_verdict: "ready", stage: "final", corrections: []},
+      evidence: [{name: "evidence/cr1c07-2.29.0.md", content: "final evidence for 2.29.0"}]
+    }}
+  }')"
+  start_mock "$scenario" || { end_case; return; }
+  setup_env
+  make_repos
+  seed_release_dir "$rid_a" 2026-08-12 2.29.0 preliminary "Not ready: 1 accuracy failure"
+  seed_release_dir "$rid_b" 2026-08-13 2.29.5 final "Ready"
+  seed_release_dir "$rid_c" 2026-08-14 2.30.0 preliminary "Ready"
+  seed_commit_push "seed three releases"
+  local a_dir="$WORKSPACE/$FOLDER/releases/2026-08-12-2.29.0"
+  local b_dir="$WORKSPACE/$FOLDER/releases/2026-08-13-2.29.5"
+  local c_dir="$WORKSPACE/$FOLDER/releases/2026-08-14-2.30.0"
+  local before after b_before c_before
+  before="$(git -C "$ORIGIN" rev-list --count main)"
+  b_before="$(dir_digest "$b_dir")"
+  c_before="$(dir_digest "$c_dir")"
+  export VERGING_MODE="sync"
+  unset VERGING_ENVIRONMENT
+
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step sync_finals.sh;     check_exit "sync_finals exits 0" 0 "$STEP_EXIT"
+
+  check_eq "the corrected release now holds its final report" "final" "$(jq -r '.stage' "$a_dir/diff.json")"
+  check_no_path "its seeded evidence file is gone" "$a_dir/evidence/seed-2.29.0.md"
+  check_file "its final evidence file is in place" "$a_dir/evidence/cr1c07-2.29.0.md"
+  check_eq "the evidence set is exactly the final report's" "1" "$(find "$a_dir/evidence" -type f | wc -l | tr -d ' ')"
+  check_eq "the already-final release is untouched" "$b_before" "$(dir_digest "$b_dir")"
+  check_eq "the still-awaiting release is untouched" "$c_before" "$(dir_digest "$c_dir")"
+  check_grep "the awaiting release is named as not out yet" "The final report for $rid_c (2.30.0) is not out yet (status: report_ready)" "$CASE_TMP/run.log"
+  check_dirs_equal "latest/ still mirrors the newest release, untouched" "$c_dir" "$WORKSPACE/$FOLDER/latest"
+  check_grep "index: the corrected release's row reads final" "[$rid_a](2026-08-12-2.29.0/REPORT.md) | Ready | final |" "$WORKSPACE/$FOLDER/releases/index.md"
+  check_grep "index: the awaiting release still reads preliminary" "[$rid_c](2026-08-14-2.30.0/REPORT.md) | Ready | preliminary" "$WORKSPACE/$FOLDER/releases/index.md"
+  after="$(git -C "$ORIGIN" rev-list --count main)"
+  check_eq "one commit for the whole sync" "$((before + 1))" "$after"
+  check_eq "the sync commit message names the one synced release" \
+    "Verging Memory CI: final report for 2.29.0 ($rid_a)" \
+    "$(git -C "$ORIGIN" log -1 --format=%s main)"
+  check_eq "no status asked for the already-final release" "0" \
+    "$(jq -rs --arg b "$rid_b" '[.[] | select(.path == ("/v1/releases/" + $b))] | length' "$MOCK_DIR/requests.log")"
+  check_eq "exactly one report fetched" "1" "$(jq -rs '[.[] | select(.path | endswith("/report"))] | length' "$MOCK_DIR/requests.log")"
+  check_eq "one commit status posted, for the corrected release only" "1" "$(grep -c 'check-runs' "$GH_SHIM_LOG")"
+  check_eq "nothing was submitted" "0" "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
   end_case
 }
 
@@ -748,6 +1030,10 @@ case_failed
 case_fetch_only
 case_evidence_paths
 case_reconcile
+case_release_syncs_pending_final
+case_sync_finals
+case_sync_noop
+case_sync_mixed
 case_push_retry
 case_push_fallback
 case_surfaces

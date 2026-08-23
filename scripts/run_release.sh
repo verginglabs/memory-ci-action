@@ -6,6 +6,11 @@
 set -euo pipefail
 source "${GITHUB_ACTION_PATH:?GITHUB_ACTION_PATH is not set}/scripts/lib.sh"
 
+if [ "$(state_get mode)" = "sync" ]; then
+  echo "mode is sync; nothing is submitted on this job."
+  exit 0
+fi
+
 timeout="$(state_get poll_timeout_minutes)"
 [ -n "$timeout" ] || timeout=45
 api_base="$(state_get api_base)"

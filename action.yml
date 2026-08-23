@@ -10,8 +10,13 @@ inputs:
     description: "Your Verging Memory CI API key, issued at onboarding. Pass it from a repository secret."
     required: true
   environment:
-    description: "The name of the environment to test in, as you named it at onboarding or via POST /v1/environments. Letters, digits, spaces, dots, underscores, plus signs, and hyphens only; single spaces between words, none at the start or the end; up to 64 characters; must not start with a hyphen."
-    required: true
+    description: "The name of the environment to test in, as you named it at onboarding or via POST /v1/environments. Required to submit a release; a sync job does not need it. Letters, digits, spaces, dots, underscores, plus signs, and hyphens only; single spaces between words, none at the start or the end; up to 64 characters; must not start with a hyphen."
+    required: false
+    default: ""
+  mode:
+    description: "What this job does. \"release\", the default, submits a release and commits its report. \"sync\" submits nothing: it reads the releases already committed in the report folder and, for each one whose final report is now out, replaces the preliminary report with the final report, in one commit. Release-mode jobs already do this sync first on every job; use mode sync with a workflow_dispatch or schedule trigger to collect final reports between releases."
+    required: false
+    default: "release"
   suites:
     description: "Comma separated test suite values, e.g. core-recall,truth-maintenance. Pass an empty string for Full Coverage (every test suite)."
     required: false
@@ -64,6 +69,7 @@ runs:
       env:
         VERGING_API_KEY: ${{ inputs.api_key }}
         VERGING_ENVIRONMENT: ${{ inputs.environment }}
+        VERGING_MODE: ${{ inputs.mode }}
         VERGING_SUITES: ${{ inputs.suites }}
         VERGING_VENDOR_VERSION: ${{ inputs.vendor_version }}
         VERGING_ENDPOINT: ${{ inputs.endpoint }}
@@ -81,6 +87,14 @@ runs:
         VERGING_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         GH_TOKEN: ${{ github.token }}
       run: '"$GITHUB_ACTION_PATH/scripts/reconcile.sh"'
+
+    - name: Sync the final reports
+      shell: bash
+      env:
+        VERGING_API_KEY: ${{ inputs.api_key }}
+        VERGING_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        GH_TOKEN: ${{ github.token }}
+      run: '"$GITHUB_ACTION_PATH/scripts/sync_finals.sh"'
 
     - name: Submit the release and collect the report
       shell: bash

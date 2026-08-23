@@ -8,6 +8,35 @@ if [ -z "${VERGING_API_KEY:-}" ]; then
   echo "::error::the api_key input is empty; pass your Verging Memory CI API key from a repository secret"
   exit 1
 fi
+# The mode. "release", the default, submits a release and commits its
+# report. "sync" (D4-A, 2026-08-23) submits nothing: the whole job is the
+# finals sync that release-mode jobs run at their start, so the final report
+# can be collected on demand or on a schedule between releases. A sync job
+# needs no environment and no version: the folder itself says what is
+# awaited.
+mode="${VERGING_MODE:-release}"
+[ -n "$mode" ] || mode="release"
+case "$mode" in
+  release|sync) ;;
+  *)
+    echo "::error::mode '$mode' is not one this action provides. Fix: use \"release\" to submit a release, or \"sync\" to commit the final reports that are now out."
+    exit 1
+    ;;
+esac
+state_set mode "$mode"
+
+if [ "$mode" = "sync" ]; then
+  if [ -n "${VERGING_FETCH_ONLY_RELEASE_ID:-}" ]; then
+    echo "::error::fetch_only_release_id does not combine with mode \"sync\". Fix: use mode \"release\" with fetch_only_release_id to fetch one release's report, or mode \"sync\" alone to collect every final report that is out."
+    exit 1
+  fi
+  state_set api_base "${VERGING_API_BASE:-https://ci.verginglabs.com}"
+  state_set folder "${VERGING_FOLDER:-Verging Memory CI}"
+  state_set fetch_only ""
+  echo "mode is sync: nothing is submitted; the releases already in the folder whose final report is out are fetched and committed."
+  exit 0
+fi
+
 if [ -z "${VERGING_ENVIRONMENT:-}" ]; then
   echo "::error::the environment input is empty; name the environment to test in, as you named it at onboarding"
   exit 1

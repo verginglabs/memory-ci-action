@@ -87,10 +87,8 @@ jobs:
 
 ## Everything else
 
-The integration guide is the one place the contract lives: what each input
-does, the permissions and why the action needs them, what lands in your
-repository, how to recover a job that failed after submitting, the two
-reports for every release, and what the action can and cannot access.
+The integration guide covers the inputs, permissions, what lands in your
+repository, and how a release's two reports work.
 
 - Integration guide: https://verginglabs.com/memory-ci/integration
 - Reading guide (every word and number in the report): https://verginglabs.com/memory-ci/reading-guide

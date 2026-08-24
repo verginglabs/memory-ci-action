@@ -735,6 +735,115 @@ case_vocabulary() {
   end_case
 }
 
+posted_body() { # echoes the body of the first POST to /v1/releases
+  jq -rs '[.[] | select(.method == "POST")][0].body' "$MOCK_DIR/requests.log"
+}
+
+case_single_setup_payload() {
+  begin_case "a single environment sends the singular environment string, no environments array"
+  local rid="run_20260815_186efbad9769"
+  start_mock "$(happy_scenario "$rid")" || { end_case; return; }
+  setup_env
+  make_repos
+  # setup_env already sets VERGING_ENVIRONMENT=staging-mcp and no VERGING_ENVIRONMENTS.
+  run_step resolve_inputs.sh; check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh
+  run_step run_release.sh;    check_exit "run_release exits 0" 0 "$STEP_EXIT"
+
+  local posted; posted="$(posted_body)"
+  check_eq "the singular environment is sent" "staging-mcp" "$(printf '%s' "$posted" | jq -r '.environment')"
+  check_eq "no environments array is sent" "null" "$(printf '%s' "$posted" | jq -r '.environments')"
+  check_eq "suites scoping still passes through" "core-recall,preference-adherence,truth-maintenance" "$(printf '%s' "$posted" | jq -r '.suites | join(",")')"
+  end_case
+}
+
+case_multi_setup_payload() {
+  begin_case "environments A,B sends an environments array and no singular environment"
+  local rid="run_20260815_186efbad9769"
+  start_mock "$(happy_scenario "$rid")" || { end_case; return; }
+  setup_env
+  make_repos
+  unset VERGING_ENVIRONMENT
+  export VERGING_ENVIRONMENTS="staging-mcp, prod-mcp"
+  run_step resolve_inputs.sh; check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh
+  run_step run_release.sh;    check_exit "run_release exits 0" 0 "$STEP_EXIT"
+
+  local posted; posted="$(posted_body)"
+  check_eq "the environments array matches the API's expected shape" '["staging-mcp","prod-mcp"]' "$(printf '%s' "$posted" | jq -c '.environments')"
+  check_eq "no singular environment is sent" "null" "$(printf '%s' "$posted" | jq -r '.environment')"
+  check_eq "the separator was trimmed, not sent as a name" "2" "$(printf '%s' "$posted" | jq -r '.environments | length')"
+  check_eq "suites scoping still passes through for multi-setup" "core-recall,preference-adherence,truth-maintenance" "$(printf '%s' "$posted" | jq -r '.suites | join(",")')"
+  check_grep "the job summary lists the setups" "| environments | \`staging-mcp, prod-mcp\` |" "$GITHUB_STEP_SUMMARY"
+  end_case
+}
+
+case_multi_setup_newline_and_suite_scope() {
+  begin_case "environments split on newlines too, and a scoped suite still passes through"
+  local rid="run_20260815_186efbad9769"
+  start_mock "$(happy_scenario "$rid")" || { end_case; return; }
+  setup_env
+  make_repos
+  unset VERGING_ENVIRONMENT
+  # Newline separated, with a blank line and a trailing comma that must not
+  # become names of their own.
+  export VERGING_ENVIRONMENTS=$'staging-mcp\nprod-mcp,\n'
+  export VERGING_SUITES="onboarding"
+  run_step resolve_inputs.sh; check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh
+  run_step run_release.sh;    check_exit "run_release exits 0" 0 "$STEP_EXIT"
+
+  local posted; posted="$(posted_body)"
+  check_eq "newline and comma separators both split the list" '["staging-mcp","prod-mcp"]' "$(printf '%s' "$posted" | jq -c '.environments')"
+  check_eq "the release is scoped to the one suite" '["onboarding"]' "$(printf '%s' "$posted" | jq -c '.suites')"
+  end_case
+}
+
+case_multi_setup_display_names() {
+  begin_case "environments accepts display names with internal spaces, and refuses a bad name without refusing the separator"
+  local rid="run_20260815_186efbad9769"
+  start_mock "$(happy_scenario "$rid")" || { end_case; return; }
+  setup_env
+  make_repos
+  unset VERGING_ENVIRONMENT
+  export VERGING_ENVIRONMENTS="Production MCP,Agent SDK"
+  run_step resolve_inputs.sh; check_exit "two display names are accepted" 0 "$STEP_EXIT"
+  run_step reconcile.sh
+  run_step run_release.sh
+  local posted; posted="$(posted_body)"
+  check_eq "display names travel verbatim in the array" '["Production MCP","Agent SDK"]' "$(printf '%s' "$posted" | jq -c '.environments')"
+
+  # A bad name in the list is refused; the comma itself is never the problem.
+  export VERGING_ENVIRONMENTS="staging-mcp,bad name!"
+  run_step resolve_inputs.sh; check_exit "a bad name in the list is refused" 1 "$STEP_EXIT"
+  check_grep "the refusal names the bad setup, not the separator" "agent setup 'bad name!' is not valid" "$CASE_TMP/run.log"
+
+  # A repeated name is refused, matching the API.
+  export VERGING_ENVIRONMENTS="staging-mcp,staging-mcp"
+  run_step resolve_inputs.sh; check_exit "a repeated name is refused" 1 "$STEP_EXIT"
+  check_grep "the refusal explains the repeat" "names an agent setup more than once" "$CASE_TMP/run.log"
+  end_case
+}
+
+case_environment_both_refused() {
+  begin_case "setting both environment and environments is refused, matching the API"
+  MOCK_PORT="0"
+  setup_env
+  make_repos
+  # setup_env sets VERGING_ENVIRONMENT=staging-mcp; add the plural too.
+  export VERGING_ENVIRONMENTS="staging-mcp,prod-mcp"
+  run_step resolve_inputs.sh
+  check_exit "resolve_inputs exits 1 when both are set" 1 "$STEP_EXIT"
+  check_grep "the refusal uses the API's own wording" "give either environment or environments, not both" "$CASE_TMP/run.log"
+
+  # Neither set at all is also refused.
+  unset VERGING_ENVIRONMENT VERGING_ENVIRONMENTS
+  run_step resolve_inputs.sh
+  check_exit "resolve_inputs exits 1 when neither is set" 1 "$STEP_EXIT"
+  check_grep "the refusal names both inputs" "set environment for a single setup, or environments for several" "$CASE_TMP/run.log"
+  end_case
+}
+
 # ---------- run ----------
 
 say "Verging Memory CI action test harness"
@@ -742,6 +851,11 @@ say "Repository under test: $ROOT"
 export PATH="$TESTDIR/shims:$PATH"
 
 case_happy_path
+case_single_setup_payload
+case_multi_setup_payload
+case_multi_setup_newline_and_suite_scope
+case_multi_setup_display_names
+case_environment_both_refused
 case_name_rules
 case_held
 case_failed

@@ -10,8 +10,13 @@ inputs:
     description: "Your Verging Memory CI API key, issued at onboarding. Pass it from a repository secret."
     required: true
   environment:
-    description: "The name of the environment to test in, as you named it at onboarding or via POST /v1/environments. Letters, digits, spaces, dots, underscores, plus signs, and hyphens only; single spaces between words, none at the start or the end; up to 64 characters; must not start with a hyphen."
-    required: true
+    description: "The name of the single agent setup (environment) to test in, as you named it at onboarding or via POST /v1/environments. For more than one setup in one release, use environments instead. Give one of environment or environments, not both. Letters, digits, spaces, dots, underscores, plus signs, and hyphens only; single spaces between words, none at the start or the end; up to 64 characters; must not start with a hyphen."
+    required: false
+    default: ""
+  environments:
+    description: "A list of agent-setup (environment) names to test together in one release, one report with a per-setup section for each. Separate names with commas and/or newlines, e.g. \"staging-mcp,prod-mcp\". Each name follows the same rule as environment. Give one of environment or environments, not both; environments is the multi-setup form of the singular environment."
+    required: false
+    default: ""
   suites:
     description: "Comma separated test suite values, e.g. core-recall,truth-maintenance. Pass an empty string for Full Coverage (every test suite)."
     required: false
@@ -64,6 +69,7 @@ runs:
       env:
         VERGING_API_KEY: ${{ inputs.api_key }}
         VERGING_ENVIRONMENT: ${{ inputs.environment }}
+        VERGING_ENVIRONMENTS: ${{ inputs.environments }}
         VERGING_SUITES: ${{ inputs.suites }}
         VERGING_VENDOR_VERSION: ${{ inputs.vendor_version }}
         VERGING_ENDPOINT: ${{ inputs.endpoint }}

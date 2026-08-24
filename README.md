@@ -39,25 +39,60 @@ jobs:
       - uses: verginglabs/memory-ci-action@v1
         with:
           api_key: ${{ secrets.VERGING_API_KEY }}
-          environment: "Production MCP"
+          environments: "Production MCP,Agent SDK"
           product_name: "Acme Recall"
           suites: core-recall,preference-adherence,truth-maintenance
           fetch_only_release_id: ${{ inputs.fetch_only_release_id }}
 ```
 
-Set the repository secret `VERGING_API_KEY` to the API key issued at onboarding, and set `environment` to one of the environment names on your account. We record those with you at onboarding and write the names; `GET /v1/environments` lists them.
+Set the repository secret `VERGING_API_KEY` to the API key issued at onboarding. Set `environments` to the comma-separated environment names on your account. One Action invocation submits one release and produces one combined report with a section for each agent setup.
 
 That is the whole install.
 
-## Everything else
+## The final report
 
-The integration guide is the one place the contract lives: what each input
-does, the permissions and why the action needs them, what lands in your
-repository, how to recover a job that failed after submitting, the two
-reports for every release, and what the action can and cannot access.
+When a preliminary report needs correction, the final report replaces it in
+your repository when ready. Automatic: your next job commits it before
+submitting anything.
+On demand and on a schedule: this second workflow.
 
-- Integration guide: https://verginglabs.com/memory-ci/integration
-- Reading guide (every word and number in the report): https://verginglabs.com/memory-ci/reading-guide
+Add this second workflow file next to the first. It uses the same `VERGING_API_KEY` secret:
 
-If a step in those pages does not give you what you need, that is a bug in
-the page: write to contact@verginglabs.com and we will fix the page.
+```yaml
+name: Verging Memory CI sync
+on:
+  workflow_dispatch: {}
+  # Optional: also collect final reports between releases, every 3 hours.
+  schedule:
+    - cron: "17 */3 * * *"
+permissions:
+  contents: write
+  checks: write
+  pull-requests: write
+concurrency:
+  group: verging-memory-ci-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  sync-finals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: "Verging Memory CI"
+          sparse-checkout-cone-mode: true
+      - uses: verginglabs/memory-ci-action@v1
+        with:
+          api_key: ${{ secrets.VERGING_API_KEY }}
+          mode: sync
+```
+
+## Reference
+
+The setup guide covers the inputs, permissions and report folder. The reference
+pages cover the API, environments, reports and billing.
+
+- Setup guide: https://verginglabs.com/memory-ci/integration
+- API: https://verginglabs.com/memory-ci/api
+- Environments: https://verginglabs.com/memory-ci/environments
+- Reading guide: https://verginglabs.com/memory-ci/reading-guide
+- Billing: https://verginglabs.com/memory-ci/billing

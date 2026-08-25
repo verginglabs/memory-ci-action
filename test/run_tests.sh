@@ -123,7 +123,7 @@ setup_env() {
   export VERGING_API_BASE="http://127.0.0.1:${MOCK_PORT:-0}"
   # The same value action.yml declares as the input default; the happy path
   # case checks the two stay in step.
-  export VERGING_SUITES="core-recall,preference-adherence,truth-maintenance"
+  export VERGING_SUITES=""   # the action.yml default: omit -> all chosen suites
   unset VERGING_VENDOR_VERSION VERGING_ENDPOINT VERGING_FOLDER 2>/dev/null
   unset VERGING_PRODUCT_NAME VERGING_FETCH_ONLY_RELEASE_ID VERGING_POLL_TIMEOUT_MINUTES VERGING_MODE 2>/dev/null
   unset VERGING_DEFAULT_BRANCH GH_PR_LIST_OUTPUT GH_COMMENTS_OUTPUT GH_SHIM_FAIL 2>/dev/null
@@ -245,10 +245,10 @@ case_happy_path() {
   posted="$(jq -rs '[.[] | select(.method == "POST")][0].body' "$MOCK_DIR/requests.log")"
   check_eq "submitted vendor_version comes from the VERSION file" "2.31.0" "$(printf '%s' "$posted" | jq -r '.vendor_version')"
   check_eq "no endpoint is submitted (the origin is pinned server-side at onboarding)" "null" "$(printf '%s' "$posted" | jq -r '.endpoint')"
-  check_eq "submitted suites default to the three suites" "core-recall,preference-adherence,truth-maintenance" "$(printf '%s' "$posted" | jq -r '.suites | join(",")')"
+  check_eq "no suites submitted by default (all chosen suites)" "null" "$(printf '%s' "$posted" | jq -r '.suites')"
   check_eq "submitted environments (one-item array)" '["staging-mcp"]' "$(printf '%s' "$posted" | jq -c '.environments')"
   check_eq "no product_name submitted when the input is empty" "null" "$(printf '%s' "$posted" | jq -r '.product_name')"
-  check_grep "action.yml declares the same suites default" 'default: "core-recall,preference-adherence,truth-maintenance"' "$ROOT/action.yml"
+  check_grep "action.yml suites default is empty (all chosen)" 'Omit it (the default) to run all the suites chosen' "$ROOT/action.yml"
   check_no_grep "action.yml declares no endpoint input" 'endpoint:' "$ROOT/action.yml"
 
   check_eq "report commit is on the triggering branch" \
@@ -799,7 +799,7 @@ case_single_setup_payload() {
   local posted; posted="$(posted_body)"
   check_eq "a one-item environments array is sent" '["staging-mcp"]' "$(printf '%s' "$posted" | jq -c '.environments')"
   check_eq "no singular environment field is sent" "null" "$(printf '%s' "$posted" | jq -r '.environment')"
-  check_eq "suites scoping still passes through" "core-recall,preference-adherence,truth-maintenance" "$(printf '%s' "$posted" | jq -r '.suites | join(",")')"
+  check_eq "no suites by default (all chosen suites)" "null" "$(printf '%s' "$posted" | jq -r '.suites')"
   end_case
 }
 
@@ -819,7 +819,7 @@ case_multi_setup_payload() {
   check_eq "the environments array matches the API's expected shape" '["staging-mcp","prod-mcp"]' "$(printf '%s' "$posted" | jq -c '.environments')"
   check_eq "no singular environment is sent" "null" "$(printf '%s' "$posted" | jq -r '.environment')"
   check_eq "the separator was trimmed, not sent as a name" "2" "$(printf '%s' "$posted" | jq -r '.environments | length')"
-  check_eq "suites scoping still passes through for multi-setup" "core-recall,preference-adherence,truth-maintenance" "$(printf '%s' "$posted" | jq -r '.suites | join(",")')"
+  check_eq "no suites by default for multi-setup (all chosen suites)" "null" "$(printf '%s' "$posted" | jq -r '.suites')"
   check_grep "the job summary lists the setups" "| environments | \`staging-mcp, prod-mcp\` |" "$GITHUB_STEP_SUMMARY"
   end_case
 }

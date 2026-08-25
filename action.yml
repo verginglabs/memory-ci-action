@@ -14,9 +14,9 @@ inputs:
     required: false
     default: ""
   suites:
-    description: "Comma separated test suite values, e.g. core-recall,truth-maintenance. Pass an empty string to run all the suites chosen for your account."
+    description: "Comma separated test suite values, e.g. core-recall,truth-maintenance. Omit it (the default) to run all the suites chosen for your account; set specific values to scope a release to those suites."
     required: false
-    default: "core-recall,preference-adherence,truth-maintenance"
+    default: ""
   vendor_version:
     description: "The identifier of the release to test. Default: the VERSION file at the repository root, else the short commit SHA."
     required: false

@@ -53,23 +53,16 @@ fi
 # Normal run: submit the release (POST /v1/releases).
 vendor_version="$(state_get vendor_version)"
 endpoint="$(state_get endpoint)"
-environment="$(state_get environment)"
 environments_json="$(state_get environments_json)"
 suites_json="$(state_get suites_json)"
 product_name="$(state_get product_name)"
 
 args=(--arg vendor_version "$vendor_version" --arg endpoint "$endpoint")
 filter='{vendor_version: $vendor_version, endpoint: $endpoint}'
-# The agent setup(s): the plural `environments` array when a list was given
-# (parity with the API), else the singular `environment` string as before.
-# resolve_inputs.sh has already ensured exactly one of the two is set.
-if [ -n "$environments_json" ]; then
-  args+=(--argjson environments "$environments_json")
-  filter="$filter + {environments: \$environments}"
-else
-  args+=(--arg environment "$environment")
-  filter="$filter + {environment: \$environment}"
-fi
+# The agent setup(s): the `environments` array (parity with the API), one name
+# or several. resolve_inputs.sh has already ensured it is set and non-empty.
+args+=(--argjson environments "$environments_json")
+filter="$filter + {environments: \$environments}"
 if [ -n "$suites_json" ]; then
   args+=(--argjson suites "$suites_json")
   filter="$filter + {suites: \$suites}"
@@ -136,11 +129,7 @@ state_set release_date "$release_date"
   echo "| | |"
   echo "|---|---|"
   echo "| vendor_version | \`$vendor_version\` |"
-  if [ -n "$environments_json" ]; then
-    echo "| environments | \`$(printf '%s' "$environments_json" | jq -r 'join(", ")')\` |"
-  else
-    echo "| environment | \`$environment\` |"
-  fi
+  echo "| environments | \`$(printf '%s' "$environments_json" | jq -r 'join(", ")')\` |"
   echo "| release_id | \`$release_id\` |"
   echo "| received_at | $(jq -r '.received_at // "(not given)"' "$receipt") |"
   echo "| scope | \`$(jq -c '.scope' "$receipt")\` |"

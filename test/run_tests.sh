@@ -119,7 +119,7 @@ setup_env() {
   : > "$GH_SHIM_LOG"
   export POLL_INTERVAL_SECONDS=0
   export VERGING_API_KEY="test-key"
-  export VERGING_ENVIRONMENT="staging-mcp"
+  export VERGING_ENVIRONMENTS="staging-mcp"
   export VERGING_API_BASE="http://127.0.0.1:${MOCK_PORT:-0}"
   # The same value action.yml declares as the input default; the happy path
   # case checks the two stay in step.
@@ -246,7 +246,7 @@ case_happy_path() {
   check_eq "submitted vendor_version comes from the VERSION file" "2.31.0" "$(printf '%s' "$posted" | jq -r '.vendor_version')"
   check_eq "submitted endpoint defaults to the standing configuration" "cfg:standing" "$(printf '%s' "$posted" | jq -r '.endpoint')"
   check_eq "submitted suites default to the three suites" "core-recall,preference-adherence,truth-maintenance" "$(printf '%s' "$posted" | jq -r '.suites | join(",")')"
-  check_eq "submitted environment" "staging-mcp" "$(printf '%s' "$posted" | jq -r '.environment')"
+  check_eq "submitted environments (one-item array)" '["staging-mcp"]' "$(printf '%s' "$posted" | jq -c '.environments')"
   check_eq "no product_name submitted when the input is empty" "null" "$(printf '%s' "$posted" | jq -r '.product_name')"
   check_grep "action.yml declares the same suites default" 'default: "core-recall,preference-adherence,truth-maintenance"' "$ROOT/action.yml"
   check_grep "action.yml declares the same endpoint default" 'default: "cfg:standing"' "$ROOT/action.yml"
@@ -332,11 +332,11 @@ case_name_rules() {
 
   # ---- and through the step a customer's run actually executes.
   export VERGING_PRODUCT_NAME="Larkspur Memory"
-  export VERGING_ENVIRONMENT="Production MCP"
+  export VERGING_ENVIRONMENTS="Production MCP"
   run_step resolve_inputs.sh
   check_exit "a two-word product name and agent setup are accepted" 0 "$STEP_EXIT"
-  check_eq "the environment is stored as the customer named it" "Production MCP" \
-    "$(cat "$RUNNER_TEMP/verging-memory-ci-state/environment")"
+  check_eq "the environment is stored as the customer named it" '["Production MCP"]' \
+    "$(cat "$RUNNER_TEMP/verging-memory-ci-state/environments_json")"
   check_eq "the product name is stored as the customer named it" "Larkspur Memory" \
     "$(cat "$RUNNER_TEMP/verging-memory-ci-state/product_name")"
 
@@ -347,12 +347,12 @@ case_name_rules() {
   check_grep "the fix wording is the API's own" "letters, digits, spaces, dots, underscores, plus signs, and hyphens only; single spaces between words, none at the start or the end" "$CASE_TMP/run.log"
 
   export VERGING_PRODUCT_NAME="Larkspur.Memory-2+beta_1"
-  export VERGING_ENVIRONMENT=".."
+  export VERGING_ENVIRONMENTS=".."
   run_step resolve_inputs.sh
   check_exit "an agent setup whose folder would be the parent directory is refused" 1 "$STEP_EXIT"
   check_grep "the refusal says what it is about" "cannot name the folder its evidence files go in" "$CASE_TMP/run.log"
 
-  export VERGING_ENVIRONMENT="staging-mcp"
+  export VERGING_ENVIRONMENTS="staging-mcp"
   export VERGING_VENDOR_VERSION="not a version"
   run_step resolve_inputs.sh
   check_exit "vendor_version still refuses spaces" 1 "$STEP_EXIT"
@@ -535,7 +535,7 @@ case_sync_mode() {
   start_mock "$scenario" || { end_case; return; }
   setup_env
   # Sync needs no environment: unset the one setup_env exports and select sync.
-  unset VERGING_ENVIRONMENT
+  unset VERGING_ENVIRONMENTS
   export VERGING_MODE="sync"
   make_repos
   seed_preliminary_release "$rid"
@@ -786,19 +786,19 @@ posted_body() { # echoes the body of the first POST to /v1/releases
 }
 
 case_single_setup_payload() {
-  begin_case "a single environment sends the singular environment string, no environments array"
+  begin_case "a single environment sends a one-item environments array, never a singular environment"
   local rid="run_20260815_186efbad9769"
   start_mock "$(happy_scenario "$rid")" || { end_case; return; }
   setup_env
   make_repos
-  # setup_env already sets VERGING_ENVIRONMENT=staging-mcp and no VERGING_ENVIRONMENTS.
+  # setup_env sets VERGING_ENVIRONMENTS=staging-mcp (one name = a one-item list).
   run_step resolve_inputs.sh; check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
   run_step reconcile.sh
   run_step run_release.sh;    check_exit "run_release exits 0" 0 "$STEP_EXIT"
 
   local posted; posted="$(posted_body)"
-  check_eq "the singular environment is sent" "staging-mcp" "$(printf '%s' "$posted" | jq -r '.environment')"
-  check_eq "no environments array is sent" "null" "$(printf '%s' "$posted" | jq -r '.environments')"
+  check_eq "a one-item environments array is sent" '["staging-mcp"]' "$(printf '%s' "$posted" | jq -c '.environments')"
+  check_eq "no singular environment field is sent" "null" "$(printf '%s' "$posted" | jq -r '.environment')"
   check_eq "suites scoping still passes through" "core-recall,preference-adherence,truth-maintenance" "$(printf '%s' "$posted" | jq -r '.suites | join(",")')"
   end_case
 }
@@ -871,22 +871,23 @@ case_multi_setup_display_names() {
   end_case
 }
 
-case_environment_both_refused() {
-  begin_case "setting both environment and environments is refused, matching the API"
+case_environment_missing_refused() {
+  begin_case "environments unset or empty is refused: no agent setup, no release"
   MOCK_PORT="0"
   setup_env
   make_repos
-  # setup_env sets VERGING_ENVIRONMENT=staging-mcp; add the plural too.
-  export VERGING_ENVIRONMENTS="staging-mcp,prod-mcp"
-  run_step resolve_inputs.sh
-  check_exit "resolve_inputs exits 1 when both are set" 1 "$STEP_EXIT"
-  check_grep "the refusal uses the API's own wording" "give either environment or environments, not both" "$CASE_TMP/run.log"
 
-  # Neither set at all is also refused.
-  unset VERGING_ENVIRONMENT VERGING_ENVIRONMENTS
+  # Not set at all is refused.
+  unset VERGING_ENVIRONMENTS
   run_step resolve_inputs.sh
-  check_exit "resolve_inputs exits 1 when neither is set" 1 "$STEP_EXIT"
-  check_grep "the refusal names both inputs" "set environment for a single setup, or environments for several" "$CASE_TMP/run.log"
+  check_exit "resolve_inputs exits 1 when environments is unset" 1 "$STEP_EXIT"
+  check_grep "the refusal names the environments input" "name the agent setup(s) to test in the environments input" "$CASE_TMP/run.log"
+
+  # Set to only separators (no names once trimmed) is refused too.
+  export VERGING_ENVIRONMENTS=" , "
+  run_step resolve_inputs.sh
+  check_exit "resolve_inputs exits 1 when environments has no names" 1 "$STEP_EXIT"
+  check_grep "the refusal explains the empty list" "no agent-setup names once the separators are removed" "$CASE_TMP/run.log"
   end_case
 }
 
@@ -901,7 +902,7 @@ case_single_setup_payload
 case_multi_setup_payload
 case_multi_setup_newline_and_suite_scope
 case_multi_setup_display_names
-case_environment_both_refused
+case_environment_missing_refused
 case_name_rules
 case_held
 case_failed

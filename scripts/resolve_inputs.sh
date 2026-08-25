@@ -30,20 +30,16 @@ if [ "$mode" = "sync" ]; then
   echo "mode sync: nothing is submitted; the reconcile pass collects any final reports now ready for releases already in the report folder."
   exit 0
 fi
-# The agent setup(s) this release runs in. A single setup is named in the
-# `environment` input; several setups tested together in one release are named
-# in the `environments` input, a list separated by commas and/or newlines
-# (parity with the API, which takes a singular `environment` string or a
-# plural `environments` array). One of the two is given, never both: sending
-# both is ambiguous, so it is refused here with the same wording the API uses.
-# Each name follows the API's display-name rule, so "Production MCP" is a name,
-# not an error. Each also becomes a directory in the report folder, so the slug
-# it produces is checked here rather than after a report has been built.
-env_single="${VERGING_ENVIRONMENT:-}"
+# The agent setup(s) this release runs in, named in the `environments` input:
+# one name or several, a list separated by commas and/or newlines. One name is
+# a one-item list; several are tested together in one release (parity with the
+# API, whose `environments` is an array). Each name follows the API's
+# display-name rule, so "Production MCP" is a name, not an error. Each also
+# becomes a directory in the report folder, so the slug it produces is checked
+# here rather than after a report has been built.
 env_list="${VERGING_ENVIRONMENTS:-}"
 
-# validate_setup_name NAME: the display-name rule plus the folder-name rule,
-# with the same two errors a single setup has always failed with.
+# validate_setup_name NAME: the display-name rule plus the folder-name rule.
 validate_setup_name() {
   local name="$1"
   if ! safe_title_ok "$name"; then
@@ -56,39 +52,31 @@ validate_setup_name() {
   fi
 }
 
-environments_json=""
-if [ -n "$env_single" ] && [ -n "$env_list" ]; then
-  echo "::error::give either environment or environments, not both. Fix: name a single agent setup in environment, or name every agent setup once in environments."
-  exit 1
-elif [ -n "$env_list" ]; then
-  # Split the list on commas and newlines, trim each name, and drop empties, so
-  # a trailing comma or a blank line is not itself a name. The delimiter is
-  # never validated as a name; only the names between delimiters are.
-  environments_json="$(printf '%s' "$env_list" \
-    | jq -Rsc 'split("\n") | map(split(",")) | add | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')"
-  if [ "$environments_json" = "[]" ]; then
-    echo "::error::the environments input has no agent-setup names once the separators are removed; name at least one agent setup, e.g. \"staging-mcp,prod-mcp\""
-    exit 1
-  fi
-  # The API refuses a repeated name; refuse it here too so it fails in seconds.
-  if [ "$(printf '%s' "$environments_json" | jq 'length')" != "$(printf '%s' "$environments_json" | jq 'unique | length')" ]; then
-    echo "::error::the environments input names an agent setup more than once. Fix: name every agent setup once; each named setup is tested once per release."
-    exit 1
-  fi
-  while IFS= read -r name; do
-    validate_setup_name "$name" || exit 1
-  done < <(printf '%s' "$environments_json" | jq -r '.[]')
-elif [ -n "$env_single" ]; then
-  validate_setup_name "$env_single" || exit 1
-else
-  echo "::error::name the agent setup to test in: set environment for a single setup, or environments for several. Name it as you named it at onboarding."
+if [ -z "$env_list" ]; then
+  echo "::error::name the agent setup(s) to test in the environments input: one name, or several separated by commas and/or newlines. Name them as you named them at onboarding."
   exit 1
 fi
+# Split the list on commas and newlines, trim each name, and drop empties, so
+# a trailing comma or a blank line is not itself a name. The delimiter is
+# never validated as a name; only the names between delimiters are.
+environments_json="$(printf '%s' "$env_list" \
+  | jq -Rsc 'split("\n") | map(split(",")) | add | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')"
+if [ "$environments_json" = "[]" ]; then
+  echo "::error::the environments input has no agent-setup names once the separators are removed; name at least one agent setup, e.g. \"staging-mcp\" or \"staging-mcp,prod-mcp\""
+  exit 1
+fi
+# The API refuses a repeated name; refuse it here too so it fails in seconds.
+if [ "$(printf '%s' "$environments_json" | jq 'length')" != "$(printf '%s' "$environments_json" | jq 'unique | length')" ]; then
+  echo "::error::the environments input names an agent setup more than once. Fix: name every agent setup once; each named setup is tested once per release."
+  exit 1
+fi
+while IFS= read -r name; do
+  validate_setup_name "$name" || exit 1
+done < <(printf '%s' "$environments_json" | jq -r '.[]')
 
 state_set api_base "${VERGING_API_BASE:-https://ci.verginglabs.com}"
 state_set folder "${VERGING_FOLDER:-Verging Memory CI}"
 state_set endpoint "${VERGING_ENDPOINT:-cfg:standing}"
-state_set environment "$env_single"
 state_set environments_json "$environments_json"
 state_set fetch_only "${VERGING_FETCH_ONLY_RELEASE_ID:-}"
 

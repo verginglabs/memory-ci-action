@@ -45,7 +45,7 @@ jobs:
           fetch_only_release_id: ${{ inputs.fetch_only_release_id }}
 ```
 
-Set the repository secret `VERGING_API_KEY` to the API key issued at onboarding. Set `environments` to the comma-separated environment names on your account. One Action invocation submits one release and produces one combined report with a section for each agent setup.
+Set the repository secret `VERGING_API_KEY` to the API key issued during onboarding. Never paste the key directly into the workflow or commit it to the repository.
 
 That is the whole install.
 

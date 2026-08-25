@@ -22,7 +22,7 @@ Verging Memory CI/
           <test>-<version>.md    one file per failed test; absent when every test passed
 ```
 
-The files are written by the Verging Memory CI GitHub Action (verginglabs/memory-ci-action) after each release. Every release is delivered twice: a preliminary report as soon as testing finishes, and a final report by next business day, with any corrections from the heavier grading. The files here are whichever report the action fetched last; the `Stage` row of the report and `diff.json`'s `stage` field say which one you are holding. When a final report lands after a run already committed the preliminary one, the next run of the action fetches it and commits the update on its own.
+The files are written by the Verging Memory CI GitHub Action (verginglabs/memory-ci-action) after each release. A release is reported in stages: a preliminary report as soon as testing finishes, and a final report when the heavier grading is complete, with any corrections it finds. The files here are whichever report the action fetched last; the `Stage` row of the report and `diff.json`'s `stage` field say which one you are holding. When a final report lands after a run already committed the preliminary one, the next run of the action fetches it and commits the update on its own.
 
 ## What Verging Memory CI tests
 

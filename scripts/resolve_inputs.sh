@@ -76,7 +76,6 @@ done < <(printf '%s' "$environments_json" | jq -r '.[]')
 
 state_set api_base "${VERGING_API_BASE:-https://ci.verginglabs.com}"
 state_set folder "${VERGING_FOLDER:-Verging Memory CI}"
-state_set endpoint "${VERGING_ENDPOINT:-cfg:standing}"
 state_set environments_json "$environments_json"
 state_set fetch_only "${VERGING_FETCH_ONLY_RELEASE_ID:-}"
 
@@ -100,8 +99,8 @@ if [ -n "$product_name" ]; then
 fi
 state_set product_name "$product_name"
 
-# suites: comma separated values to a JSON array. An empty value means Full
-# Coverage: the suites field is omitted from the request.
+# suites: comma separated values to a JSON array. An empty value means all the
+# suites chosen for the account: the suites field is omitted from the request.
 suites_csv="${VERGING_SUITES:-}"
 suites_json=""
 if [ -n "$suites_csv" ]; then

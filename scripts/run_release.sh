@@ -52,13 +52,12 @@ fi
 
 # Normal run: submit the release (POST /v1/releases).
 vendor_version="$(state_get vendor_version)"
-endpoint="$(state_get endpoint)"
 environments_json="$(state_get environments_json)"
 suites_json="$(state_get suites_json)"
 product_name="$(state_get product_name)"
 
-args=(--arg vendor_version "$vendor_version" --arg endpoint "$endpoint")
-filter='{vendor_version: $vendor_version, endpoint: $endpoint}'
+args=(--arg vendor_version "$vendor_version")
+filter='{vendor_version: $vendor_version}'
 # The agent setup(s): the `environments` array (parity with the API), one name
 # or several. resolve_inputs.sh has already ensured it is set and non-empty.
 args+=(--argjson environments "$environments_json")
@@ -67,7 +66,7 @@ if [ -n "$suites_json" ]; then
   args+=(--argjson suites "$suites_json")
   filter="$filter + {suites: \$suites}"
 else
-  echo "No suites selected: this release is Full Coverage (every test suite)."
+  echo "No suites selected: this release runs all the suites chosen for your account."
 fi
 if [ -n "$product_name" ]; then
   args+=(--arg product_name "$product_name")
@@ -111,7 +110,7 @@ jq -r '
   "  release_id:     \(.release_id)",
   "  received_at:    \(.received_at // "(not given)")",
   "  status:         \(.status // "(receipt carries no status field; queued per the 202)")",
-  "  scope:          \(if .scope == null then "null (Full Coverage)" else (.scope | tojson) end)",
+  "  scope:          \(if .scope == null then "null (all the suites chosen for your account)" else (.scope | tojson) end)",
   "  scope_summary:  \(.scope_summary // "(not given)")",
   "  status_url:     \(.status_url // "(not given)")",
   "  message:        \(.message // "(not given)")"

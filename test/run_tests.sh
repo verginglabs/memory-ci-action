@@ -244,12 +244,12 @@ case_happy_path() {
   local posted
   posted="$(jq -rs '[.[] | select(.method == "POST")][0].body' "$MOCK_DIR/requests.log")"
   check_eq "submitted vendor_version comes from the VERSION file" "2.31.0" "$(printf '%s' "$posted" | jq -r '.vendor_version')"
-  check_eq "submitted endpoint defaults to the standing configuration" "cfg:standing" "$(printf '%s' "$posted" | jq -r '.endpoint')"
+  check_eq "no endpoint is submitted (the origin is pinned server-side at onboarding)" "null" "$(printf '%s' "$posted" | jq -r '.endpoint')"
   check_eq "submitted suites default to the three suites" "core-recall,preference-adherence,truth-maintenance" "$(printf '%s' "$posted" | jq -r '.suites | join(",")')"
   check_eq "submitted environments (one-item array)" '["staging-mcp"]' "$(printf '%s' "$posted" | jq -c '.environments')"
   check_eq "no product_name submitted when the input is empty" "null" "$(printf '%s' "$posted" | jq -r '.product_name')"
   check_grep "action.yml declares the same suites default" 'default: "core-recall,preference-adherence,truth-maintenance"' "$ROOT/action.yml"
-  check_grep "action.yml declares the same endpoint default" 'default: "cfg:standing"' "$ROOT/action.yml"
+  check_no_grep "action.yml declares no endpoint input" 'endpoint:' "$ROOT/action.yml"
 
   check_eq "report commit is on the triggering branch" \
     "Verging Memory CI: report for 2.31.0 ($rid): Ready" \

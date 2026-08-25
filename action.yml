@@ -14,17 +14,13 @@ inputs:
     required: false
     default: ""
   suites:
-    description: "Comma separated test suite values, e.g. core-recall,truth-maintenance. Pass an empty string for Full Coverage (every test suite)."
+    description: "Comma separated test suite values, e.g. core-recall,truth-maintenance. Pass an empty string to run all the suites chosen for your account."
     required: false
     default: "core-recall,preference-adherence,truth-maintenance"
   vendor_version:
     description: "The identifier of the release to test. Default: the VERSION file at the repository root, else the short commit SHA."
     required: false
     default: ""
-  endpoint:
-    description: "Your staging endpoint, or the standing configuration reference agreed at onboarding."
-    required: false
-    default: "cfg:standing"
   api_base:
     description: "Base URL of the Verging Memory CI API."
     required: false
@@ -71,7 +67,6 @@ runs:
         VERGING_ENVIRONMENTS: ${{ inputs.environments }}
         VERGING_SUITES: ${{ inputs.suites }}
         VERGING_VENDOR_VERSION: ${{ inputs.vendor_version }}
-        VERGING_ENDPOINT: ${{ inputs.endpoint }}
         VERGING_API_BASE: ${{ inputs.api_base }}
         VERGING_FOLDER: ${{ inputs.folder }}
         VERGING_PRODUCT_NAME: ${{ inputs.product_name }}

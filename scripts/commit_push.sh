@@ -25,5 +25,10 @@ if git diff --cached --quiet; then
   state_set push_path "none-needed"
   exit 0
 fi
-git commit -m "Verging Memory CI: report for $vendor_version ($release_id): $verdict"
+if [ "$(state_get wiring_done)" = "1" ]; then
+  # A wiring check's page: committed like a report, named for what it is.
+  git commit -m "Verging Memory CI: wiring check for $vendor_version ($release_id)"
+else
+  git commit -m "Verging Memory CI: report for $vendor_version ($release_id): $verdict"
+fi
 push_with_fallback

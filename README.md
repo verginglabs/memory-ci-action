@@ -49,6 +49,17 @@ Set the repository secret `VERGING_API_KEY` to the API key issued during onboard
 
 That is the whole install.
 
+## The first push
+
+The first job performs the free wiring check on its own and commits its page
+under `Verging Memory CI/`; it needs nothing activated and nothing else from
+you. Until Verging Labs has activated the test suites on your agent setups,
+every job performs the wiring check instead of a release, and the job passes:
+its page is committed like a report, and the job's outputs say `Wiring check`
+in place of a verdict. Verging Labs tells you when your suites are set up;
+pushes after that run real releases. To repeat the wiring check at any time,
+pass the input `wiring_check: "true"`.
+
 ## The final report
 
 When a preliminary report needs correction, the final report replaces it in

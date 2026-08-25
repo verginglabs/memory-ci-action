@@ -20,7 +20,10 @@ Verging Memory CI/
       evidence/                  the files the report's Evidence pointers name
         <agent setup>/           one directory per agent setup on the release
           <test>-<version>.md    one file per failed test; absent when every test passed
+    <date>-<version>-wiring-check/   a wiring check's page, committed like a report; nothing was tested
 ```
+
+A wiring check proves the integration (key, submission, report, and the commit back) without testing anything, and is never billed. The action performs one on its own on the first push, and on every push until Verging Labs has activated the test suites on the agent setups; its page lands under `releases/` with `Wiring check` in the index in place of a verdict. `latest/` holds regression reports only, so nothing gated on it ever reads a wiring page.
 
 The files are written by the Verging Memory CI GitHub Action (verginglabs/memory-ci-action) after each release. A release is reported in stages: a preliminary report as soon as testing finishes, and a final report when the heavier grading is complete, with any corrections it finds. The files here are whichever report the action fetched last; the `Stage` row of the report and `diff.json`'s `stage` field say which one you are holding. When a final report lands after a run already committed the preliminary one, the next run of the action fetches it and commits the update on its own.
 

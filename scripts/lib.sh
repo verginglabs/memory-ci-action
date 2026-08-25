@@ -396,6 +396,86 @@ fetch_and_write() {
   return 0
 }
 
+# wiring_slug_for RELEASE_DATE VENDOR_VERSION RELEASE_ID FOLDER: the wiring
+# page's directory name: the release slug with "-wiring-check" appended, so a
+# real release of the same version on the same day keeps its own directory.
+# A same-day repeat of the wiring check for the same version gets the id's
+# short stem appended, exactly as slug_for does.
+wiring_slug_for() {
+  local slug="$1-$2-wiring-check" dir="$4/releases/$1-$2-wiring-check"
+  if [ -d "$dir" ] && [ "$(jq -r '.release_id // empty' "$dir/release.json" 2>/dev/null)" != "$3" ]; then
+    slug="$slug-$(printf '%s' "$3" | tail -c 12)"
+  fi
+  printf '%s' "$slug"
+}
+
+# fetch_and_write_wiring RELEASE_ID RELEASE_DATE: fetch a wiring check's page
+# and write it into the report folder exactly like a report (REPORT.md,
+# diff.json, release.json; a wiring check has no evidence), plus the index
+# row and the folder README. latest/ is NOT touched: it holds the newest
+# regression report, and a wiring page carries no verdict to gate on.
+# Records vendor_version, verdict ("Wiring check"), slug and report_path in
+# the step state, and marks the run as a wiring check (wiring_done).
+fetch_and_write_wiring() {
+  local id="$1" release_date="$2"
+  local folder report code vendor_version slug dir format
+  folder="$(state_get folder)"
+  report="$(state_dir)/report.json"
+  code="$(api_get "/v1/releases/$id/report" "$report")"
+  if [ "$code" != "200" ]; then
+    echo "::error::GET /v1/releases/$id/report returned HTTP $code"
+    print_error_body "$report"
+    return 1
+  fi
+  format="$(jq -r '.diff.format // empty' "$report")"
+  if [ "$format" != "wiring-check/v1" ]; then
+    echo "::warning::the page for $id does not carry the wiring-check format (diff.format: ${format:-not recorded}); committing it as a wiring check anyway"
+  fi
+
+  vendor_version="$(jq -r '.vendor_version // empty' "$report")"
+  [ -n "$vendor_version" ] || vendor_version="$(state_get vendor_version)"
+  [ -n "$vendor_version" ] || vendor_version="not-recorded"
+
+  slug="$(wiring_slug_for "$release_date" "$vendor_version" "$id" "$folder")"
+  dir="$folder/releases/$slug"
+  write_release_dir "$report" "$dir" || return 1
+  ensure_folder_readme "$folder"
+  echo "Wiring check $id: page written to $dir/REPORT.md. Nothing was tested and nothing is billed."
+
+  ensure_index "$folder"
+  if grep -qF "[$id](" "$folder/releases/index.md"; then
+    index_update_row "$folder" "$id" \
+      "| $release_date | $vendor_version | [$id]($slug/REPORT.md) | Wiring check | wiring |"
+  else
+    printf '| %s | %s | [%s](%s/REPORT.md) | %s | %s |\n' \
+      "$release_date" "$vendor_version" "$id" "$slug" "Wiring check" "wiring" \
+      >> "$folder/releases/index.md"
+  fi
+
+  state_set vendor_version "$vendor_version"
+  state_set release_id "$id"
+  state_set verdict "Wiring check"
+  state_set slug "$slug"
+  state_set report_path "$folder/releases/$slug/REPORT.md"
+  state_set wiring_done "1"
+
+  {
+    echo "### Wiring check"
+    echo
+    echo "This run performed the free wiring check instead of a release: nothing was tested and nothing is billed."
+    echo
+    echo "Page: \`$dir/REPORT.md\`"
+    echo
+    echo "<details><summary>Top of the page</summary>"
+    echo
+    head -n 60 "$dir/REPORT.md"
+    echo
+    echo "</details>"
+    echo
+  } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+  return 0
+}
+
 # push_with_fallback: push HEAD to the triggering branch with a fetch and
 # rebase retry. If the push still fails, the job does NOT fail: the same
 # commit is delivered on the branch verging-memory-ci/reports with a pull

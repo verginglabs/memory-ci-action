@@ -4,6 +4,10 @@
 Reads its script from $MOCK_DIR/scenario.json:
   receipt        the 202 body for POST /v1/releases
   receipt_code   optional, defaults to 202
+  wiring_receipt optional: the body served instead for a POST whose body
+                 carries "wiring_check": true (the action's wiring check);
+                 without it every POST gets `receipt`
+  wiring_receipt_code  optional, defaults to 202
   statuses       list of status bodies for GET /v1/releases/{id},
                  served in order, last one sticky
   status_by_id   optional map of release id to its own status list
@@ -70,7 +74,15 @@ class Handler(BaseHTTPRequestHandler):
         self._record(body)
         sc = load_scenario()
         if self.path == "/v1/releases":
-            self._send(sc.get("receipt_code", 202), sc["receipt"])
+            wiring = False
+            try:
+                wiring = json.loads(body).get("wiring_check") is True
+            except (ValueError, AttributeError):
+                wiring = False
+            if wiring and "wiring_receipt" in sc:
+                self._send(sc.get("wiring_receipt_code", 202), sc["wiring_receipt"])
+            else:
+                self._send(sc.get("receipt_code", 202), sc["receipt"])
         else:
             self._send(404, {"error": "unknown path", "fix": "check the path"})
 

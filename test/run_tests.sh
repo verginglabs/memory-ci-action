@@ -248,6 +248,9 @@ case_happy_path() {
   check_eq "no suites submitted by default (all chosen suites)" "null" "$(printf '%s' "$posted" | jq -r '.suites')"
   check_eq "submitted environments (one-item array)" '["staging-mcp"]' "$(printf '%s' "$posted" | jq -c '.environments')"
   check_eq "no product_name submitted when the input is empty" "null" "$(printf '%s' "$posted" | jq -r '.product_name')"
+  check_eq "no wiring_check field on a normal release" "null" "$(printf '%s' "$posted" | jq -r '.wiring_check')"
+  check_no_grep "a normal release never says wiring check" "wiring check" "$CASE_TMP/run.log"
+  check_no_grep "no notice on a normal release" "::notice::" "$CASE_TMP/run.log"
   check_grep "action.yml suites default is empty (all chosen)" 'Omit it (the default) to run all the suites chosen' "$ROOT/action.yml"
   check_no_grep "action.yml declares no endpoint input" 'endpoint:' "$ROOT/action.yml"
 
@@ -445,6 +448,191 @@ case_fetch_only() {
     "Verging Memory CI: report for 2.30.9 ($rid): Ready" \
     "$(git -C "$ORIGIN" log -1 --format=%s main)"
   check_grep "output release_id" "release_id=$rid" "$GITHUB_OUTPUT"
+  end_case
+}
+
+# ---------- the wiring check ----------
+
+WIRING_NOTICE="::notice::Verging Labs has not activated the test suites on your agent setups yet, so this run performed the free wiring check instead of a release and committed its page. Verging Labs tells you when your suites are set up; pushes after that run real releases."
+
+make_wiring_md() { # $1 product; the shape the API serves (no verdict row, its own stage)
+  printf '# Wiring check for %s\n\nEverything on this page proves your integration reaches us and reports come back.\nThis is a wiring check, not a regression report: no test suite ran, nothing is scored, and it is free.\n\n| **Wiring check** | %s |\n|---|---|\n| **Date** | 2026-08-25 |\n| **Stage** | Wiring check |\n\n## What this page proves\n\n- **Your API key authenticated.**\n' "$1" "$1"
+}
+
+wiring_scenario() { # $1 wiring id: the wiring receipt and page; the plain-release receipt is the caller's
+  local md
+  md="$(make_wiring_md "Larkspur")"
+  jq -n --arg md "$md" --arg wid "$1" '{
+    wiring_receipt: {
+      release_id: $wid,
+      received_at: "2026-08-25T09:00:00.000Z",
+      wiring_check: true,
+      status: "delivered",
+      status_url: ("/v1/releases/" + $wid),
+      report_url: ("/v1/releases/" + $wid + "/report"),
+      message: "this is a wiring check, and it is free: it proves your integration reaches us and reports come back. No test suite ran and nothing is billed. Your wiring report is ready now; fetch it from the report URL on this receipt."
+    },
+    report_by_id: {($wid): {
+      release_id: $wid, status: "delivered", vendor_version: "2.31.0",
+      scope: {suites: ["core-recall","preference-adherence","truth-maintenance"]},
+      corrections_due_by: null,
+      report_markdown: $md,
+      diff: {format: "wiring-check/v1", stage: "wiring", wiring_check: true, release_id: $wid,
+             verified: {key_authenticated: true, suites: ["core-recall"], report_route: ("/v1/releases/" + $wid + "/report")},
+             billing: {billable: false, reason: "wiring check: free, never billed"}},
+      evidence: []
+    }}
+  }'
+}
+
+not_set_up_receipt='{
+  "error": "Core Recall on staging-mcp is not set up yet on your account",
+  "fix": "Verging Labs runs activations first: contact your Verging Labs contact to set it up, or run only the suites already set up on your agent setups (GET /v1/environments)",
+  "code": "not_set_up"
+}'
+
+check_wiring_page_committed() { # $1 wiring id: the page landed like a report, the job's outputs say so
+  local dir="$WORKSPACE/$FOLDER/releases/2026-08-25-2.31.0-wiring-check"
+  check_file "the wiring page is written like a report (REPORT.md)" "$dir/REPORT.md"
+  check_file "diff.json written" "$dir/diff.json"
+  check_file "release.json written" "$dir/release.json"
+  check_eq "diff.json carries the wiring format" "wiring-check/v1" "$(jq -r '.format' "$dir/diff.json")"
+  check_eq "release.json names the wiring check's id" "$1" "$(jq -r '.release_id' "$dir/release.json")"
+  check_no_path "no evidence directory (a wiring check has none)" "$dir/evidence"
+  check_no_path "latest/ is left for regression reports" "$WORKSPACE/$FOLDER/latest"
+  check_file "folder README written" "$WORKSPACE/$FOLDER/README.md"
+  check_grep "index row says Wiring check in place of a verdict" "[$1](2026-08-25-2.31.0-wiring-check/REPORT.md) | Wiring check | wiring |" "$WORKSPACE/$FOLDER/releases/index.md"
+  check_eq "the commit is named for what it is" \
+    "Verging Memory CI: wiring check for 2.31.0 ($1)" \
+    "$(git -C "$ORIGIN" log -1 --format=%s main)"
+  check_grep "output verdict is Wiring check" "verdict=Wiring check" "$GITHUB_OUTPUT"
+  check_grep "output release_id is the wiring check's id" "release_id=$1" "$GITHUB_OUTPUT"
+  check_grep "output report_path is the committed page" "report_path=$FOLDER/releases/2026-08-25-2.31.0-wiring-check/REPORT.md" "$GITHUB_OUTPUT"
+  check_no_path "nothing was polled: a wiring check is served on delivery" "$MOCK_DIR/status-$1.count"
+  check_grep "job summary says what this run did" "### Wiring check" "$GITHUB_STEP_SUMMARY"
+  check_grep "check run title is not a verdict" "output\[title\]=Wiring\ check\,\ not\ a\ release" "$GH_SHIM_LOG"
+  check_grep "check run conclusion is neutral (not a verdict)" "conclusion=neutral" "$GH_SHIM_LOG"
+  check_eq "no check run concludes failure" "0" "$(grep -c 'conclusion=failure' "$GH_SHIM_LOG")"
+}
+
+case_wiring_check_input() {
+  begin_case "wiring_check: true performs the wiring check instead of a release and commits its page"
+  local wid="run_20260825_0a1b2c3d4e5f"
+  # A plain release POST is refused by the mock, so a run that submitted one
+  # instead of the wiring check fails loudly.
+  start_mock "$(wiring_scenario "$wid" | jq '.receipt_code = 400 | .receipt = {error: "the test expected a wiring check, not a release", fix: "-"}')" || { end_case; return; }
+  setup_env
+  make_repos
+  export VERGING_WIRING_CHECK="true"
+
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh;       check_exit "reconcile exits 0" 0 "$STEP_EXIT"
+  run_step run_release.sh;     check_exit "run_release exits 0" 0 "$STEP_EXIT"
+  run_step commit_push.sh;     check_exit "commit_push exits 0" 0 "$STEP_EXIT"
+  run_step surfaces.sh;        check_exit "surfaces exits 0" 0 "$STEP_EXIT"
+  run_step set_outputs.sh;     check_exit "set_outputs exits 0: the job is green" 0 "$STEP_EXIT"
+
+  check_eq "exactly one request was submitted" "1" "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
+  local posted; posted="$(posted_body)"
+  check_eq "it is a wiring check" "true" "$(printf '%s' "$posted" | jq -r '.wiring_check')"
+  check_eq "with the same environments a release would name" '["staging-mcp"]' "$(printf '%s' "$posted" | jq -c '.environments')"
+  check_eq "and the same vendor_version" "2.31.0" "$(printf '%s' "$posted" | jq -r '.vendor_version')"
+  check_grep "the log says what this run does" "wiring_check is true: this run performs the free wiring check instead of a release" "$CASE_TMP/run.log"
+  check_grep "the closing notice names the input" "::notice::wiring_check is true, so this run performed the free wiring check instead of a release and committed its page." "$CASE_TMP/run.log"
+  check_no_grep "no error anywhere in the run" "::error::" "$CASE_TMP/run.log"
+  check_wiring_page_committed "$wid"
+  check_grep "action.yml declares the wiring_check input" "wiring_check:" "$ROOT/action.yml"
+
+  # The input's own rules.
+  export VERGING_WIRING_CHECK="maybe"
+  run_step resolve_inputs.sh;  check_exit "a value other than true/false is refused" 1 "$STEP_EXIT"
+  check_grep "the refusal names the input" "wiring_check 'maybe' is not valid" "$CASE_TMP/run.log"
+  export VERGING_WIRING_CHECK="true"
+  export VERGING_FETCH_ONLY_RELEASE_ID="run_20260810_ffeeddccbbaa"
+  run_step resolve_inputs.sh;  check_exit "wiring_check + fetch_only_release_id is refused" 1 "$STEP_EXIT"
+  check_grep "the refusal names the conflict" "fetch_only_release_id submits nothing; they cannot be combined" "$CASE_TMP/run.log"
+  unset VERGING_FETCH_ONLY_RELEASE_ID
+  export VERGING_MODE="sync"
+  run_step resolve_inputs.sh;  check_exit "wiring_check + mode sync is refused" 1 "$STEP_EXIT"
+  check_grep "the refusal names sync" "cannot be combined with wiring_check" "$CASE_TMP/run.log"
+  unset VERGING_MODE VERGING_WIRING_CHECK
+  end_case
+}
+
+case_not_set_up_fallback() {
+  begin_case "a 409 with code not_set_up turns the release into a wiring check: green job, page committed, notice emitted"
+  local wid="run_20260825_0a1b2c3d4e5f"
+  start_mock "$(wiring_scenario "$wid" | jq --argjson r "$not_set_up_receipt" '.receipt_code = 409 | .receipt = $r')" || { end_case; return; }
+  setup_env
+  make_repos
+
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh;       check_exit "reconcile exits 0" 0 "$STEP_EXIT"
+  run_step run_release.sh;     check_exit "run_release exits 0 on the not_set_up 409" 0 "$STEP_EXIT"
+  run_step commit_push.sh;     check_exit "commit_push exits 0" 0 "$STEP_EXIT"
+  # The surfaces on a pull request: the one comment says the same line.
+  export GITHUB_EVENT_NAME="pull_request"
+  export GITHUB_EVENT_PATH="$CASE_TMP/event.json"
+  jq -n '{pull_request: {number: 12, head: {sha: "abc123def4567890abc123def4567890abc123de"}}}' > "$GITHUB_EVENT_PATH"
+  run_step surfaces.sh;        check_exit "surfaces exits 0" 0 "$STEP_EXIT"
+  run_step set_outputs.sh;     check_exit "set_outputs exits 0: the job is green" 0 "$STEP_EXIT"
+
+  check_eq "two requests: the release, then the wiring check" "2" "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
+  local first second
+  first="$(jq -rs '[.[] | select(.method == "POST")][0].body' "$MOCK_DIR/requests.log")"
+  second="$(jq -rs '[.[] | select(.method == "POST")][1].body' "$MOCK_DIR/requests.log")"
+  check_eq "the first request is the release (no wiring_check field)" "null" "$(printf '%s' "$first" | jq -r '.wiring_check')"
+  check_eq "the second request is the wiring check" "true" "$(printf '%s' "$second" | jq -r '.wiring_check')"
+  check_eq "the wiring check carries the release's own fields" "$(printf '%s' "$first" | jq -c '.')" "$(printf '%s' "$second" | jq -c 'del(.wiring_check)')"
+  check_grep "the log states the refusal by its code" "POST /v1/releases returned HTTP 409 with code not_set_up" "$CASE_TMP/run.log"
+  check_grep "the refusal's own text is shown" "Core Recall on staging-mcp is not set up yet" "$CASE_TMP/run.log"
+  check_grep "the exact notice is emitted" "$WIRING_NOTICE" "$CASE_TMP/run.log"
+  check_no_grep "no error anywhere in the run" "::error::" "$CASE_TMP/run.log"
+  check_no_grep "the job summary never says the release was not accepted" "release not accepted" "$GITHUB_STEP_SUMMARY"
+  check_wiring_page_committed "$wid"
+  check_grep "the check run says the same in one line" "output\[summary\]=Verging\ Labs\ has\ not\ activated\ the\ test\ suites\ on\ your\ agent\ setups\ yet\,\ so\ this\ run\ performed\ the\ free\ wiring\ check\ instead\ of\ a\ release" "$GH_SHIM_LOG"
+  check_grep "the pull request comment is the one-line form" "**Verging Memory CI: wiring check, not a release.** Verging Labs has not activated the test suites on your agent setups yet, so this run performed the free wiring check instead of a release and committed its page" "$GH_SHIM_LOG"
+  check_grep "the comment links the committed page" "/acme/widget/blob/main/Verging%20Memory%20CI/releases/2026-08-25-2.31.0-wiring-check/REPORT.md" "$GH_SHIM_LOG"
+  check_no_grep "the comment carries no verdict" "[Read the report]" "$GH_SHIM_LOG"
+  end_case
+}
+
+case_other_409_fails() {
+  begin_case "any other refusal fails the job exactly as before: a 409 without the code, a 409 with another code, another status with the code"
+  local wid="run_20260825_0a1b2c3d4e5f"
+  # 1. A 409 with no code at all.
+  start_mock "$(wiring_scenario "$wid" | jq '.receipt_code = 409 | .receipt = {error: "a wiring check needs at least one agent setup on your account, and there is none yet", fix: "contact your Verging Labs onboarding contact to add one"}')" || { end_case; return; }
+  setup_env
+  make_repos
+  run_step resolve_inputs.sh
+  run_step reconcile.sh
+  run_step run_release.sh;     check_exit "a 409 without code not_set_up fails the job" 1 "$STEP_EXIT"
+  check_eq "nothing else was submitted" "1" "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
+  check_grep "the error is the same as before" "::error::POST /v1/releases returned HTTP 409 (expected 202)" "$CASE_TMP/run.log"
+  check_grep "the refusal's text is shown" "a wiring check needs at least one agent setup" "$CASE_TMP/run.log"
+  check_grep "the job summary says the release was not accepted" "release not accepted" "$GITHUB_STEP_SUMMARY"
+  check_no_path "no report folder written" "$WORKSPACE/$FOLDER"
+  check_no_grep "no notice" "::notice::" "$CASE_TMP/run.log"
+
+  # 2. A 409 with a different code: the English is never matched, the code is.
+  printf '%s' "$(wiring_scenario "$wid" | jq --argjson r "$not_set_up_receipt" '.receipt_code = 409 | .receipt = ($r | .code = "something_else")')" > "$MOCK_DIR/scenario.json"
+  : > "$MOCK_DIR/requests.log"
+  run_step run_release.sh;     check_exit "a 409 with another code fails even though the text reads not set up" 1 "$STEP_EXIT"
+  check_eq "nothing else was submitted" "1" "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
+
+  # 3. The code on a status other than 409 is not the door-check.
+  printf '%s' "$(wiring_scenario "$wid" | jq --argjson r "$not_set_up_receipt" '.receipt_code = 402 | .receipt = $r')" > "$MOCK_DIR/scenario.json"
+  : > "$MOCK_DIR/requests.log"
+  run_step run_release.sh;     check_exit "a 402 carrying the code still fails" 1 "$STEP_EXIT"
+  check_eq "nothing else was submitted" "1" "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
+  check_grep "the error names the status" "::error::POST /v1/releases returned HTTP 402 (expected 202)" "$CASE_TMP/run.log"
+
+  # 4. The wiring check itself refused after a not_set_up 409: a real failure.
+  printf '%s' "$(wiring_scenario "$wid" | jq --argjson r "$not_set_up_receipt" '.receipt_code = 409 | .receipt = $r | .wiring_receipt_code = 401 | .wiring_receipt = {error: "invalid API key", fix: "pass the key issued at onboarding"}')" > "$MOCK_DIR/scenario.json"
+  : > "$MOCK_DIR/requests.log"
+  run_step run_release.sh;     check_exit "a refused wiring check fails the job" 1 "$STEP_EXIT"
+  check_grep "the error names the wiring check" "::error::POST /v1/releases (wiring check) returned HTTP 401" "$CASE_TMP/run.log"
+  check_no_path "no report folder written" "$WORKSPACE/$FOLDER"
   end_case
 }
 
@@ -907,6 +1095,9 @@ case_name_rules
 case_held
 case_failed
 case_fetch_only
+case_wiring_check_input
+case_not_set_up_fallback
+case_other_409_fails
 case_evidence_paths
 case_reconcile
 case_sync_mode

@@ -16,6 +16,17 @@ source "${GITHUB_ACTION_PATH:?GITHUB_ACTION_PATH is not set}/scripts/lib.sh"
   echo "report_path=$(state_get report_path)"
 } >> "${GITHUB_OUTPUT:-/dev/null}"
 
+# A wiring check ends with one notice saying what this run did and why, so
+# a customer reading the run's summary never mistakes it for a release. The
+# page is committed by now (the commit step ran before this one).
+if [ "$(state_get wiring_done)" = "1" ]; then
+  if [ "$(state_get wiring_why)" = "not_set_up" ]; then
+    echo "::notice::Verging Labs has not activated the test suites on your agent setups yet, so this run performed the free wiring check instead of a release and committed its page. Verging Labs tells you when your suites are set up; pushes after that run real releases."
+  else
+    echo "::notice::wiring_check is true, so this run performed the free wiring check instead of a release and committed its page. Nothing was tested and nothing is billed."
+  fi
+fi
+
 refused="$(state_get evidence_refused)"
 case "$refused" in ''|*[!0-9]*) refused=0 ;; esac
 if [ "$refused" -gt 0 ]; then

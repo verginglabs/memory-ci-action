@@ -2,7 +2,10 @@
 # The release itself. Normal runs submit a release, poll until the report is
 # ready, and write it into the report folder. When fetch_only_release_id is
 # set, nothing is submitted: the named release's report is fetched and
-# written exactly like a normal run's.
+# written exactly like a normal run's. When wiring_check is true, or when the
+# API refuses the release with HTTP 409 and code "not_set_up" (the test
+# suites are not set up on the agent setups yet), the free wiring check is
+# submitted instead, its page is written like a report, and the run passes.
 set -euo pipefail
 source "${GITHUB_ACTION_PATH:?GITHUB_ACTION_PATH is not set}/scripts/lib.sh"
 
@@ -73,6 +76,76 @@ if [ -n "$product_name" ]; then
   filter="$filter + {product_name: \$product_name}"
 fi
 body="$(jq -cn "${args[@]}" "$filter")"
+
+# submit_wiring_check BODY WHY: POST the same request with wiring_check: true,
+# then fetch its page and write it into the report folder like a report. WHY
+# is "input" (the wiring_check input) or "not_set_up" (the release was refused
+# because the suites are not set up yet); the surfaces and the closing notice
+# read it. A wiring check is served on delivery, so nothing is polled.
+submit_wiring_check() {
+  local body="$1" why="$2" wbody receipt code release_id release_date
+  wbody="$(printf '%s' "$body" | jq -c '. + {wiring_check: true}')"
+  echo "POST $api_base/v1/releases (wiring check)"
+  echo "Request body: $wbody"
+  receipt="$(state_dir)/receipt.json"
+  code="$(curl -sS -o "$receipt" -w '%{http_code}' \
+    -X POST "$api_base/v1/releases" \
+    -H "Authorization: Bearer ${VERGING_API_KEY:?VERGING_API_KEY is not set}" \
+    -H "Content-Type: application/json" \
+    -d "$wbody")" || code="000"
+  if [ "$code" != "202" ]; then
+    echo "::error::POST /v1/releases (wiring check) returned HTTP $code (expected 202)"
+    print_error_body "$receipt"
+    {
+      echo "## Verging Memory CI: wiring check not accepted"
+      echo
+      echo "POST /v1/releases with wiring_check: true returned HTTP $code."
+      echo
+      echo '```'
+      cat "$receipt" 2>/dev/null || true
+      echo '```'
+    } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+    return 1
+  fi
+  release_id="$(jq -r '.release_id // empty' "$receipt")"
+  if [ -z "$release_id" ]; then
+    echo "::error::the wiring check's receipt carries no release_id"
+    cat "$receipt"
+    return 1
+  fi
+  echo "Receipt (HTTP 202, wiring check):"
+  jq -r '
+    "  release_id:     \(.release_id)",
+    "  received_at:    \(.received_at // "(not given)")",
+    "  status:         \(.status // "(not given)")",
+    "  message:        \(.message // "(not given)")"
+  ' "$receipt"
+  release_date="$(jq -r '.received_at // empty' "$receipt" | cut -c1-10)"
+  [ -n "$release_date" ] || release_date="$(date -u +%Y-%m-%d)"
+  state_set release_id "$release_id"
+  state_set release_date "$release_date"
+  state_set wiring_why "$why"
+  {
+    echo "## Verging Memory CI"
+    echo
+    echo "| | |"
+    echo "|---|---|"
+    echo "| wiring check | \`$release_id\` |"
+    echo "| vendor_version | \`$vendor_version\` |"
+    echo "| environments | \`$(printf '%s' "$environments_json" | jq -r 'join(", ")')\` |"
+    echo "| received_at | $(jq -r '.received_at // "(not given)"' "$receipt") |"
+    echo
+  } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+  fetch_and_write_wiring "$release_id" "$release_date"
+}
+
+# The wiring_check input: the free wiring check instead of a release.
+if [ "$(state_get wiring_check)" = "true" ]; then
+  echo "wiring_check is true: this run performs the free wiring check instead of a release and commits its page. Nothing is tested and nothing is billed."
+  submit_wiring_check "$body" "input" || exit 1
+  exit 0
+fi
+
 echo "POST $api_base/v1/releases"
 echo "Request body: $body"
 
@@ -84,6 +157,23 @@ code="$(curl -sS -o "$receipt" -w '%{http_code}' \
   -d "$body")" || code="000"
 
 if [ "$code" != "202" ]; then
+  # The one refusal this action acts on by name: HTTP 409 whose body carries
+  # code "not_set_up" means Verging Labs has not activated the test suites on
+  # the named agent setups yet. It is read from the body's `code` field, never
+  # from the English text. The free wiring check is performed instead, its
+  # page is committed, and the job passes. Every other refusal, 409 or not,
+  # fails the job exactly as before.
+  refusal_code=""
+  if [ "$code" = "409" ] && jq -e . "$receipt" >/dev/null 2>&1; then
+    refusal_code="$(jq -r '.code // empty' "$receipt")"
+  fi
+  if [ "$refusal_code" = "not_set_up" ]; then
+    echo "POST /v1/releases returned HTTP 409 with code not_set_up:"
+    print_error_body "$receipt"
+    echo "Verging Labs has not activated the test suites on your agent setups yet, so this run performs the free wiring check instead of a release. Nothing is used or billed for the refused release."
+    submit_wiring_check "$body" "not_set_up" || exit 1
+    exit 0
+  fi
   echo "::error::POST /v1/releases returned HTTP $code (expected 202)"
   print_error_body "$receipt"
   {

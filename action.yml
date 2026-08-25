@@ -37,6 +37,10 @@ inputs:
     description: "Fetch and commit the report of this existing release id without submitting anything. Use it to recover a run that failed after submitting; the id is in that run's log."
     required: false
     default: ""
+  wiring_check:
+    description: "Set to \"true\" to perform the free wiring check instead of a release: the Action submits a wiring check, commits its page into the report folder exactly like a report, and the job passes. Nothing is tested and nothing is billed. Not needed for the first push: while the test suites on your agent setups are not set up yet, every release is turned into a wiring check on its own and the job passes. Do not combine it with fetch_only_release_id or mode: sync."
+    required: false
+    default: "false"
   mode:
     description: "`release` (the default) submits a release and collects its report. `sync` submits nothing and collects any final reports now ready for releases already in the report folder, replacing their preliminary reports. In sync mode no environment is needed; do not combine it with fetch_only_release_id."
     required: false
@@ -48,13 +52,13 @@ inputs:
 
 outputs:
   release_id:
-    description: "The id of the release whose report this run fetched."
+    description: "The id of the release whose report this run fetched, or of the wiring check this run performed."
     value: ${{ steps.finish.outputs.release_id }}
   verdict:
-    description: "The Release verdict from the report header: Ready, or Not ready with the reason."
+    description: "The Release verdict from the report header: Ready, or Not ready with the reason. \"Wiring check\" when this run performed the wiring check instead of a release (nothing was tested; not a verdict)."
     value: ${{ steps.finish.outputs.verdict }}
   report_path:
-    description: "Repository relative path of the committed REPORT.md for this release."
+    description: "Repository relative path of the committed REPORT.md for this release, or of the wiring check's page."
     value: ${{ steps.finish.outputs.report_path }}
 
 runs:
@@ -71,6 +75,7 @@ runs:
         VERGING_FOLDER: ${{ inputs.folder }}
         VERGING_PRODUCT_NAME: ${{ inputs.product_name }}
         VERGING_FETCH_ONLY_RELEASE_ID: ${{ inputs.fetch_only_release_id }}
+        VERGING_WIRING_CHECK: ${{ inputs.wiring_check }}
         VERGING_POLL_TIMEOUT_MINUTES: ${{ inputs.poll_timeout_minutes }}
         VERGING_MODE: ${{ inputs.mode }}
       run: '"$GITHUB_ACTION_PATH/scripts/resolve_inputs.sh"'

@@ -24,6 +24,10 @@ if [ "$mode" = "sync" ]; then
     echo "::error::mode: sync collects every ready final report in the folder and cannot be combined with fetch_only_release_id (which fetches one specific release). Fix: use one or the other."
     exit 1
   fi
+  if [ "${VERGING_WIRING_CHECK:-false}" = "true" ]; then
+    echo "::error::mode: sync submits nothing and cannot be combined with wiring_check (which submits a wiring check). Fix: use one or the other."
+    exit 1
+  fi
   # Only the reconcile pass runs after this; set exactly what it reads.
   state_set api_base "${VERGING_API_BASE:-https://ci.verginglabs.com}"
   state_set folder "${VERGING_FOLDER:-Verging Memory CI}"
@@ -78,6 +82,25 @@ state_set api_base "${VERGING_API_BASE:-https://ci.verginglabs.com}"
 state_set folder "${VERGING_FOLDER:-Verging Memory CI}"
 state_set environments_json "$environments_json"
 state_set fetch_only "${VERGING_FETCH_ONLY_RELEASE_ID:-}"
+
+# wiring_check: "true" performs the free wiring check instead of a release.
+# Its page is committed exactly like a report; nothing is tested and nothing
+# is billed. It cannot be combined with fetch_only_release_id, which submits
+# nothing at all. (Without it, a release the API refuses with code
+# "not_set_up" is turned into a wiring check on its own; see run_release.sh.)
+wiring_check="${VERGING_WIRING_CHECK:-false}"
+case "$wiring_check" in
+  true|false) ;;
+  *)
+    echo "::error::wiring_check '$wiring_check' is not valid. Fix: use 'true' (perform the free wiring check instead of a release) or 'false' (the default: submit a release)."
+    exit 1
+    ;;
+esac
+if [ "$wiring_check" = "true" ] && [ -n "${VERGING_FETCH_ONLY_RELEASE_ID:-}" ]; then
+  echo "::error::wiring_check submits a wiring check, and fetch_only_release_id submits nothing; they cannot be combined. Fix: use one or the other."
+  exit 1
+fi
+state_set wiring_check "$wiring_check"
 
 timeout="${VERGING_POLL_TIMEOUT_MINUTES:-45}"
 if ! printf '%s' "$timeout" | grep -Eq '^[0-9]+$'; then

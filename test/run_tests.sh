@@ -125,7 +125,7 @@ setup_env() {
   # case checks the two stay in step.
   export VERGING_SUITES="core-recall,preference-adherence,truth-maintenance"
   unset VERGING_VENDOR_VERSION VERGING_ENDPOINT VERGING_FOLDER 2>/dev/null
-  unset VERGING_PRODUCT_NAME VERGING_FETCH_ONLY_RELEASE_ID VERGING_POLL_TIMEOUT_MINUTES 2>/dev/null
+  unset VERGING_PRODUCT_NAME VERGING_FETCH_ONLY_RELEASE_ID VERGING_POLL_TIMEOUT_MINUTES VERGING_MODE 2>/dev/null
   unset VERGING_DEFAULT_BRANCH GH_PR_LIST_OUTPUT GH_COMMENTS_OUTPUT GH_SHIM_FAIL 2>/dev/null
 }
 
@@ -516,6 +516,52 @@ case_reconcile() {
   end_case
 }
 
+case_sync_mode() {
+  begin_case "mode: sync collects finals with no environment and submits nothing"
+  local rid="run_20260814_aaaabbbbcccc"
+  local md scenario
+  md="$(make_report_md "Larkspur 2.30.0" "Ready" "Final report")"
+  scenario="$(jq -n --arg md "$md" --arg rid "$rid" '{
+    report_by_id: {($rid): {
+      release_id: $rid, status: "corrected", vendor_version: "2.30.0",
+      scope: {suites: ["core-recall"]}, corrections_due_by: "2026-08-17",
+      report_markdown: $md,
+      diff: {format: "release-diff/v1", verdict: "pass", cost_verdict: "pass",
+             release_verdict: "ready", stage: "final",
+             corrections: [{test: "core-recall-1", from: "fail", to: "pass"}]},
+      evidence: []
+    }}
+  }')"
+  start_mock "$scenario" || { end_case; return; }
+  setup_env
+  # Sync needs no environment: unset the one setup_env exports and select sync.
+  unset VERGING_ENVIRONMENT
+  export VERGING_MODE="sync"
+  make_repos
+  seed_preliminary_release "$rid"
+
+  run_step resolve_inputs.sh
+  check_exit "resolve_inputs exits 0 in sync mode with no environment" 0 "$STEP_EXIT"
+  run_step reconcile.sh
+  check_exit "reconcile exits 0" 0 "$STEP_EXIT"
+
+  local dir="$WORKSPACE/$FOLDER/releases/2026-08-14-2.30.0"
+  check_eq "the preliminary report was collected as final" "final" "$(jq -r '.stage' "$dir/diff.json")"
+  check_grep "the final report replaced the preliminary" "| **Release verdict** | Ready |" "$dir/REPORT.md"
+
+  # The guarded submit step is a safe no-op in sync mode, and nothing is posted.
+  run_step run_release.sh
+  check_exit "run_release is a no-op in sync mode" 0 "$STEP_EXIT"
+  check_no_grep "no release was submitted in sync mode" "release-tests" "$MOCK_DIR/requests.log"
+
+  # sync cannot be combined with fetch_only_release_id.
+  export VERGING_FETCH_ONLY_RELEASE_ID="$rid"
+  run_step resolve_inputs.sh
+  check_exit "sync + fetch_only_release_id is refused" 1 "$STEP_EXIT"
+  check_grep "the refusal names the conflict" "cannot be combined with fetch_only_release_id" "$CASE_TMP/run.log"
+  end_case
+}
+
 case_push_retry() {
   begin_case "a conflicting commit on the branch is absorbed by fetch and rebase"
   local rid="run_20260815_186efbad9769"
@@ -862,6 +908,7 @@ case_failed
 case_fetch_only
 case_evidence_paths
 case_reconcile
+case_sync_mode
 case_push_retry
 case_push_fallback
 case_surfaces

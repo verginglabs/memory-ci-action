@@ -6,6 +6,14 @@
 set -euo pipefail
 source "${GITHUB_ACTION_PATH:?GITHUB_ACTION_PATH is not set}/scripts/lib.sh"
 
+# In sync mode nothing is submitted: the reconcile pass has already collected
+# any ready final reports. action.yml skips this step in sync mode; this guard
+# makes the script a safe no-op even if it is invoked directly.
+if [ "$(state_get mode)" = "sync" ]; then
+  echo "mode sync: nothing is submitted; the reconcile pass collected any ready final reports."
+  exit 0
+fi
+
 timeout="$(state_get poll_timeout_minutes)"
 [ -n "$timeout" ] || timeout=45
 api_base="$(state_get api_base)"

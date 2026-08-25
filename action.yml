@@ -45,6 +45,10 @@ inputs:
     description: "Fetch and commit the report of this existing release id without submitting anything. Use it to recover a run that failed after submitting; the id is in that run's log."
     required: false
     default: ""
+  mode:
+    description: "`release` (the default) submits a release and collects its report. `sync` submits nothing and collects any final reports now ready for releases already in the report folder, replacing their preliminary reports. In sync mode no environment is needed; do not combine it with fetch_only_release_id."
+    required: false
+    default: "release"
   poll_timeout_minutes:
     description: "How many minutes to wait for the report before giving up."
     required: false
@@ -78,6 +82,7 @@ runs:
         VERGING_PRODUCT_NAME: ${{ inputs.product_name }}
         VERGING_FETCH_ONLY_RELEASE_ID: ${{ inputs.fetch_only_release_id }}
         VERGING_POLL_TIMEOUT_MINUTES: ${{ inputs.poll_timeout_minutes }}
+        VERGING_MODE: ${{ inputs.mode }}
       run: '"$GITHUB_ACTION_PATH/scripts/resolve_inputs.sh"'
 
     - name: Reconcile earlier reports
@@ -89,12 +94,14 @@ runs:
       run: '"$GITHUB_ACTION_PATH/scripts/reconcile.sh"'
 
     - name: Submit the release and collect the report
+      if: ${{ inputs.mode != 'sync' }}
       shell: bash
       env:
         VERGING_API_KEY: ${{ inputs.api_key }}
       run: '"$GITHUB_ACTION_PATH/scripts/run_release.sh"'
 
     - name: Commit and push the report
+      if: ${{ inputs.mode != 'sync' }}
       shell: bash
       env:
         VERGING_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -102,6 +109,7 @@ runs:
       run: '"$GITHUB_ACTION_PATH/scripts/commit_push.sh"'
 
     - name: Post the check and the pull request comment
+      if: ${{ inputs.mode != 'sync' }}
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -109,5 +117,6 @@ runs:
 
     - name: Set outputs and check the report is complete
       id: finish
+      if: ${{ inputs.mode != 'sync' }}
       shell: bash
       run: '"$GITHUB_ACTION_PATH/scripts/set_outputs.sh"'

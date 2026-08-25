@@ -8,6 +8,28 @@ if [ -z "${VERGING_API_KEY:-}" ]; then
   echo "::error::the api_key input is empty; pass your Verging Memory CI API key from a repository secret"
   exit 1
 fi
+
+# mode: `release` (default) submits a release and collects its report; `sync`
+# submits nothing and lets the reconcile pass collect any final reports now
+# ready for releases already in the report folder. Sync needs no environment
+# and no version, so it validates only what the reconcile pass reads and exits.
+mode="${VERGING_MODE:-release}"
+if [ "$mode" != "release" ] && [ "$mode" != "sync" ]; then
+  echo "::error::mode '$mode' is not valid. Fix: use 'release' (the default: submit a release and collect its report) or 'sync' (submit nothing and collect final reports already in the report folder)."
+  exit 1
+fi
+state_set mode "$mode"
+if [ "$mode" = "sync" ]; then
+  if [ -n "${VERGING_FETCH_ONLY_RELEASE_ID:-}" ]; then
+    echo "::error::mode: sync collects every ready final report in the folder and cannot be combined with fetch_only_release_id (which fetches one specific release). Fix: use one or the other."
+    exit 1
+  fi
+  # Only the reconcile pass runs after this; set exactly what it reads.
+  state_set api_base "${VERGING_API_BASE:-https://ci.verginglabs.com}"
+  state_set folder "${VERGING_FOLDER:-Verging Memory CI}"
+  echo "mode sync: nothing is submitted; the reconcile pass collects any final reports now ready for releases already in the report folder."
+  exit 0
+fi
 # The agent setup(s) this release runs in. A single setup is named in the
 # `environment` input; several setups tested together in one release are named
 # in the `environments` input, a list separated by commas and/or newlines

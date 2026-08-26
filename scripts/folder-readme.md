@@ -13,6 +13,7 @@ Verging Memory CI/
     release.json                 release_id, vendor_version, scope, corrections_due_by
   releases/
     index.md                     one line per release: date, vendor_version, release id, Release verdict
+    pending.json                 releases whose report is not here yet, keyed by release id; absent when none
     <date>-<version>/            one directory per tested release, kept
       REPORT.md
       diff.json
@@ -25,7 +26,9 @@ Verging Memory CI/
 
 A wiring check proves the integration (key, submission, report, and the commit back) without testing anything, and is never billed. The action performs one on its own on the first push, and on every push until Verging Labs has activated the test suites on the agent setups; its page lands under `releases/` with `Wiring check` in the index in place of a verdict. `latest/` holds regression reports only, so nothing gated on it ever reads a wiring page.
 
-The files are written by the Verging Memory CI GitHub Action (verginglabs/memory-ci-action) after each release. A release is reported in stages: a preliminary report as soon as testing finishes, and a final report when the heavier grading is complete, with any corrections it finds. The files here are whichever report the action fetched last; the `Stage` row of the report and `diff.json`'s `stage` field say which one you are holding. When a final report lands after a run already committed the preliminary one, the next run of the action fetches it and commits the update on its own.
+The files are written by the Verging Memory CI GitHub Action (verginglabs/memory-ci-action) after each release. A release is reported in stages: a preliminary report as soon as testing finishes, and a final report when the heavier grading is complete, with any corrections it finds. The files here are whichever report the action fetched last; the `Stage` row of the report and `diff.json`'s `stage` field say which one you are holding. When a final report lands after a job already committed the preliminary one, the next job of the action fetches it and commits the update on its own.
+
+Testing a release usually takes one to three hours. A job that stops waiting before the report is ready (its `poll_timeout_minutes` passed) records the release in `releases/pending.json`: release id, `vendor_version`, the agent setups, the submission time, and the last status seen. The next job of the action, or a `mode: sync` job, commits the report and removes the entry. A release that fails on the Verging side gets a `Failed` line in the index, with the failure, and no directory.
 
 ## What Verging Memory CI tests
 

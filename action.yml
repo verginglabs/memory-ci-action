@@ -34,7 +34,7 @@ inputs:
     required: false
     default: ""
   fetch_only_release_id:
-    description: "Fetch and commit the report of this existing release id without submitting anything. Use it to recover a run that failed after submitting; the id is in that run's log."
+    description: "Fetch and commit the report of this existing release id without submitting anything. Use it to recover a job that failed after submitting; the id is in that job's log. A job that stopped waiting for its report needs no recovery: the release is on record as pending in the report folder, and the next job (or a mode: sync job) commits the report once it is ready."
     required: false
     default: ""
   wiring_check:
@@ -42,11 +42,11 @@ inputs:
     required: false
     default: "false"
   mode:
-    description: "`release` (the default) submits a release and collects its report. `sync` submits nothing and collects any final reports now ready for releases already in the report folder, replacing their preliminary reports. In sync mode no environment is needed; do not combine it with fetch_only_release_id."
+    description: "`release` (the default) submits a release and collects its report. `sync` submits nothing and collects any reports now ready for releases already in the report folder: the preliminary report of a release an earlier job stopped waiting for (recorded in releases/pending.json), and the final report of a release still on its preliminary report, which it replaces. In sync mode no environment is needed; do not combine it with fetch_only_release_id."
     required: false
     default: "release"
   poll_timeout_minutes:
-    description: "How many minutes to wait for the report before giving up."
+    description: "How many minutes the job waits for the report. Testing a release usually takes one to three hours on the Verging side, so the default (45) often passes first: the job then ends green with the verdict output `Pending`, the release is recorded in the report folder's releases/pending.json, and the next job on any push, or a mode: sync job, commits the report once it is ready. Raise it to have the report land on the same job (a waiting job spends Actions minutes); 0 stops waiting right after the receipt."
     required: false
     default: "45"
 
@@ -55,10 +55,10 @@ outputs:
     description: "The id of the release whose report this run fetched, or of the wiring check this run performed."
     value: ${{ steps.finish.outputs.release_id }}
   verdict:
-    description: "The Release verdict from the report header: Ready, or Not ready with the reason. \"Wiring check\" when this run performed the wiring check instead of a release (nothing was tested; not a verdict)."
+    description: "The Release verdict from the report header: Ready, or Not ready with the reason. \"Wiring check\" when this run performed the wiring check instead of a release (nothing was tested; not a verdict). \"Pending\" when the job stopped waiting before the report was ready (poll_timeout_minutes passed): the release is on record as pending and a later job commits the report."
     value: ${{ steps.finish.outputs.verdict }}
   report_path:
-    description: "Repository relative path of the committed REPORT.md for this release, or of the wiring check's page."
+    description: "Repository relative path of the committed REPORT.md for this release, or of the wiring check's page. Empty when the verdict is Pending: the report is not in the repository yet."
     value: ${{ steps.finish.outputs.report_path }}
 
 runs:
@@ -95,8 +95,11 @@ runs:
         VERGING_API_KEY: ${{ inputs.api_key }}
       run: '"$GITHUB_ACTION_PATH/scripts/run_release.sh"'
 
+    # Runs unless the job was cancelled: a release the job stopped waiting
+    # for, or one whose report could not be fetched after the receipt, is
+    # committed as pending so a later job collects its report.
     - name: Commit and push the report
-      if: ${{ inputs.mode != 'sync' }}
+      if: ${{ !cancelled() && inputs.mode != 'sync' }}
       shell: bash
       env:
         VERGING_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}

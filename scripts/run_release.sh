@@ -1,26 +1,45 @@
 #!/usr/bin/env bash
 # The release itself. Normal runs submit a release, poll until the report is
-# ready, and write it into the report folder. When fetch_only_release_id is
-# set, nothing is submitted: the named release's report is fetched and
-# written exactly like a normal run's. When wiring_check is true, or when the
-# API refuses the release with HTTP 409 and code "not_set_up" (the test
-# suites are not set up on the agent setups yet), the free wiring check is
-# submitted instead, its page is written like a report, and the run passes.
+# ready, and write it into the report folder. The release goes on record as
+# pending (releases/pending.json) the moment it is accepted; when the deadline
+# passes before the report is ready the job ends green with the verdict
+# "Pending", and the reconcile pass of a later job collects the report. When
+# fetch_only_release_id is set, nothing is submitted: the named release's
+# report is fetched and written exactly like a normal run's. When
+# wiring_check is true, or when the API refuses the release with HTTP 409 and
+# code "not_set_up" (the test suites are not set up on the agent setups yet),
+# the free wiring check is submitted instead, its page is written like a
+# report, and the run passes.
 set -euo pipefail
 source "${GITHUB_ACTION_PATH:?GITHUB_ACTION_PATH is not set}/scripts/lib.sh"
 
 # In sync mode nothing is submitted: the reconcile pass has already collected
-# any ready final reports. action.yml skips this step in sync mode; this guard
+# any reports now ready. action.yml skips this step in sync mode; this guard
 # makes the script a safe no-op even if it is invoked directly.
 if [ "$(state_get mode)" = "sync" ]; then
-  echo "mode sync: nothing is submitted; the reconcile pass collected any ready final reports."
+  echo "mode sync: nothing is submitted; the reconcile pass collected any reports now ready for the releases on record."
   exit 0
 fi
 
 timeout="$(state_get poll_timeout_minutes)"
 [ -n "$timeout" ] || timeout=45
 api_base="$(state_get api_base)"
+folder="$(state_get folder)"
 fetch_only="$(state_get fetch_only)"
+
+# wait_for_report RELEASE_ID: poll until the report is ready, then return 0.
+# When the deadline passes first the release stays on record as pending, the
+# job ends green (exit 0 from here), and when the release failed on the
+# Verging side the entry is cleared and the job ends red (exit 1 from here).
+wait_for_report() {
+  local id="$1" rc
+  poll_release "$id" "$timeout" && rc=0 || rc=$?
+  case "$rc" in
+    0) pending_set_status "$folder" "$id" "$(state_get last_status)"; return 0 ;;
+    2) stop_waiting "$id" "$(state_get last_status)"; exit 0 ;;
+    *) pending_clear "$folder" "$id"; exit 1 ;;
+  esac
+}
 
 if [ -n "$fetch_only" ]; then
   id="$fetch_only"
@@ -46,7 +65,16 @@ if [ -n "$fetch_only" ]; then
       ;;
     *)
       echo "Release $id is not finished yet (status: $status); waiting for the report."
-      poll_release "$id" "$timeout"
+      # Put the release on record as pending from its status body, unless it
+      # is already there, so a job that stops waiting leaves it for the next.
+      if [ -z "$(pending_get "$folder" "$id")" ]; then
+        pending_set "$folder" "$id" "$(jq -c --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
+          vendor_version: (.vendor_version // "not-recorded"),
+          environments: (.environments.agent_setups // []),
+          submitted_at: (.received_at // $now),
+          status: (.status // "unknown")}' "$status_file")"
+      fi
+      wait_for_report "$id"
       ;;
   esac
   fetch_and_write "$id" "$release_date"
@@ -205,12 +233,25 @@ jq -r '
   "  status_url:     \(.status_url // "(not given)")",
   "  message:        \(.message // "(not given)")"
 ' "$receipt"
-echo "If this run stops before the report is committed, re-run with fetch_only_release_id=$release_id to fetch and commit it without submitting again."
+echo "If this job stops before the report is committed, the release stays on record as pending and the next job commits the report; to fetch it by hand, re-run with fetch_only_release_id=$release_id (nothing is submitted again)."
 
 release_date="$(jq -r '.received_at // empty' "$receipt" | cut -c1-10)"
 [ -n "$release_date" ] || release_date="$(date -u +%Y-%m-%d)"
 state_set release_id "$release_id"
 state_set release_date "$release_date"
+
+# The pending record, written the moment the release is accepted: it is
+# committed with the folder whenever this job stops before the report is in,
+# and the reconcile pass of a later job collects the report from it.
+submitted_at="$(jq -r '.received_at // empty' "$receipt")"
+[ -n "$submitted_at" ] || submitted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+pending_set "$folder" "$release_id" "$(jq -cn \
+  --arg vendor_version "$vendor_version" \
+  --argjson environments "$environments_json" \
+  --arg submitted_at "$submitted_at" \
+  --arg status "$(jq -r '.status // "queued"' "$receipt")" \
+  '{vendor_version: $vendor_version, environments: $environments, submitted_at: $submitted_at, status: $status}')"
+echo "Release $release_id is on record as pending in $folder/releases/pending.json until its report reaches the folder."
 
 {
   echo "## Verging Memory CI"
@@ -226,5 +267,5 @@ state_set release_date "$release_date"
   echo
 } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
-poll_release "$release_id" "$timeout"
+wait_for_report "$release_id"
 fetch_and_write "$release_id" "$release_date"

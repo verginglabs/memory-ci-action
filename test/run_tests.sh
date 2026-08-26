@@ -253,6 +253,8 @@ case_happy_path() {
   check_no_grep "no notice on a normal release" "::notice::" "$CASE_TMP/run.log"
   check_grep "action.yml suites default is empty (all chosen)" 'Omit it (the default) to run all the suites chosen' "$ROOT/action.yml"
   check_no_grep "action.yml declares no endpoint input" 'endpoint:' "$ROOT/action.yml"
+  check_grep "the release went on record as pending at the receipt" "is on record as pending in $FOLDER/releases/pending.json" "$CASE_TMP/run.log"
+  check_no_path "no pending record once the report is in the folder" "$WORKSPACE/$FOLDER/releases/pending.json"
 
   check_eq "report commit is on the triggering branch" \
     "Verging Memory CI: report for 2.31.0 ($rid): Ready" \
@@ -404,7 +406,12 @@ case_failed() {
   check_exit "run_release exits 1 on failed" 1 "$STEP_EXIT"
   check_grep "the failure text is printed" "we could not reach your endpoint from the agent environment" "$CASE_TMP/run.log"
   check_grep "the voided copy is printed" "The release is voided; voided tests are never billed." "$CASE_TMP/run.log"
-  check_no_path "no report folder written on a failed release" "$WORKSPACE/$FOLDER"
+  check_no_path "no report written on a failed release" "$WORKSPACE/$FOLDER/latest"
+  check_no_path "no index written on a failed release" "$WORKSPACE/$FOLDER/releases/index.md"
+  check_no_path "no pending record is left for a failed release" "$WORKSPACE/$FOLDER/releases/pending.json"
+  run_step commit_push.sh
+  check_exit "commit_push exits 0 with nothing to commit" 0 "$STEP_EXIT"
+  check_eq "nothing was committed" "initial commit" "$(git -C "$ORIGIN" log -1 --format=%s main)"
   end_case
 }
 
@@ -1079,6 +1086,272 @@ case_environment_missing_refused() {
   end_case
 }
 
+# ---------- the pending record: a job that stops waiting ----------
+
+pending_notice() { # $1 release id, $2 last status: the exact notice
+  printf '%s' "::notice::Verging Labs is still testing release $1 (last status: $2). This job stops waiting; your next push or the sync job commits the report when it is ready. To wait longer, set poll_timeout_minutes."
+}
+
+# new_job: a later job in the same repository. Fresh step state, outputs,
+# summary, gh log and run log; the workspace and the origin stay as the last
+# job left them.
+new_job() {
+  rm -rf "$RUNNER_TEMP/verging-memory-ci-state"
+  : > "$GITHUB_OUTPUT"
+  : > "$GITHUB_STEP_SUMMARY"
+  : > "$GH_SHIM_LOG"
+  cat "$CASE_TMP/run.log" >> "$CASE_TMP/run-earlier.log"
+  : > "$CASE_TMP/run.log"
+}
+
+# set_scenario JSON: swap the mock's script; forget served statuses and
+# recorded requests.
+set_scenario() {
+  printf '%s' "$1" > "$MOCK_DIR/scenario.json"
+  rm -f "$MOCK_DIR"/status-*.count
+  : > "$MOCK_DIR/requests.log"
+}
+
+seed_pending_release() { # $1 release id, $2 vendor_version, $3 submitted_at: a pending record an earlier job committed
+  mkdir -p "$WORKSPACE/$FOLDER/releases"
+  jq -n --arg rid "$1" --arg v "$2" --arg at "$3" \
+    '{($rid): {vendor_version: $v, environments: ["staging-mcp"], submitted_at: $at, status: "running"}}' \
+    > "$WORKSPACE/$FOLDER/releases/pending.json"
+  cp "$ROOT/scripts/folder-readme.md" "$WORKSPACE/$FOLDER/README.md"
+  (
+    cd "$WORKSPACE"
+    git add "$FOLDER"
+    git commit -qm "Verging Memory CI: release $2 ($1) is pending; the report follows"
+    git push -q origin HEAD:main
+  )
+}
+
+case_timeout_pending() {
+  begin_case "the deadline passes: the job ends green with the release on record as pending, and a later sync job commits the report"
+  local rid="run_20260826_5e6f7a8b9c0d"
+  start_mock "$(happy_scenario "$rid" | jq --arg rid "$rid" '.statuses = [{release_id: $rid, status: "running", updated_at: "2026-08-15T08:40:00Z"}]')" || { end_case; return; }
+  setup_env
+  make_repos
+  export VERGING_POLL_TIMEOUT_MINUTES="0"
+
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh;       check_exit "reconcile exits 0" 0 "$STEP_EXIT"
+  run_step run_release.sh;     check_exit "run_release exits 0 when the deadline passes" 0 "$STEP_EXIT"
+  run_step commit_push.sh;     check_exit "commit_push exits 0" 0 "$STEP_EXIT"
+  export GITHUB_EVENT_NAME="pull_request"
+  export GITHUB_EVENT_PATH="$CASE_TMP/event.json"
+  jq -n '{pull_request: {number: 12, head: {sha: "abc123def4567890abc123def4567890abc123de"}}}' > "$GITHUB_EVENT_PATH"
+  run_step surfaces.sh;        check_exit "surfaces exits 0" 0 "$STEP_EXIT"
+  run_step set_outputs.sh;     check_exit "set_outputs exits 0: the job is green" 0 "$STEP_EXIT"
+
+  check_grep "the exact notice is emitted" "$(pending_notice "$rid" running)" "$CASE_TMP/run.log"
+  check_no_grep "no error anywhere in the job" "::error::" "$CASE_TMP/run.log"
+  check_eq "the status was asked for once, then the job stopped waiting" "1" "$(cat "$MOCK_DIR/status-$rid.count")"
+  local pending="$WORKSPACE/$FOLDER/releases/pending.json"
+  check_file "the pending record is written" "$pending"
+  check_eq "the pending entry: vendor_version, environments, submitted_at, last status" \
+    '{"vendor_version":"2.31.0","environments":["staging-mcp"],"submitted_at":"2026-08-15T08:25:59.868Z","status":"running"}' \
+    "$(jq -c --arg rid "$rid" '.[$rid]' "$pending")"
+  check_no_path "no release directory: there is no report yet" "$WORKSPACE/$FOLDER/releases/2026-08-15-2.31.0"
+  check_no_path "no latest/: there is no report yet" "$WORKSPACE/$FOLDER/latest"
+  check_no_path "no index row without a report" "$WORKSPACE/$FOLDER/releases/index.md"
+  check_file "folder README written" "$WORKSPACE/$FOLDER/README.md"
+  check_eq "the pending record is committed and pushed" \
+    "Verging Memory CI: release 2.31.0 ($rid) is pending; the report follows" \
+    "$(git -C "$ORIGIN" log -1 --format=%s main)"
+  check_grep "the commit carries the pending record" "$FOLDER/releases/pending.json" <(git -C "$ORIGIN" show --name-only --format= main)
+  check_grep "output release_id" "release_id=$rid" "$GITHUB_OUTPUT"
+  check_grep "output verdict is Pending" "verdict=Pending" "$GITHUB_OUTPUT"
+  check_eq "output report_path is empty" "report_path=" "$(grep '^report_path=' "$GITHUB_OUTPUT")"
+  check_grep "check run title says Report pending" "output\[title\]=Report\ pending" "$GH_SHIM_LOG"
+  check_grep "check run conclusion is neutral" "conclusion=neutral" "$GH_SHIM_LOG"
+  check_eq "no check run concludes failure" "0" "$(grep -c 'conclusion=failure' "$GH_SHIM_LOG")"
+  check_grep "the check run says it in one line" "output\[summary\]=Verging\ Labs\ is\ still\ testing\ release" "$GH_SHIM_LOG"
+  check_grep "the check run line names the last status and what happens next" "last\ status:\ running\).\ Your\ next\ push\ or\ the\ sync\ job\ commits\ the\ report\ when\ it\ is\ ready." "$GH_SHIM_LOG"
+  check_grep "the pull request comment says report pending in one line" "**Verging Memory CI: report pending.** Verging Labs is still testing release" "$GH_SHIM_LOG"
+  check_no_grep "the comment links no report" "[Read the report]" "$GH_SHIM_LOG"
+  check_grep "job summary says the report is pending" "### Report pending" "$GITHUB_STEP_SUMMARY"
+  check_grep "action.yml documents the Pending verdict" 'Pending\" when the job stopped waiting before the report was ready' "$ROOT/action.yml"
+  check_grep "action.yml commits on every path but a cancel" "if: \${{ !cancelled() && inputs.mode != 'sync' }}" "$ROOT/action.yml"
+
+  # A later sync job: the report is ready now.
+  new_job
+  set_scenario "$(happy_scenario "$rid" | jq --arg rid "$rid" '.statuses = [{release_id: $rid, status: "report_ready", updated_at: "2026-08-15T10:31:00Z", corrections_due_by: "2026-08-18"}]')"
+  export GITHUB_EVENT_NAME="push"
+  unset GITHUB_EVENT_PATH VERGING_ENVIRONMENTS VERGING_POLL_TIMEOUT_MINUTES
+  export VERGING_MODE="sync"
+  run_step resolve_inputs.sh;  check_exit "sync: resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh;       check_exit "sync: reconcile exits 0" 0 "$STEP_EXIT"
+  check_grep "the reconcile pass found the pending release" "Release $rid (2.31.0) is on record as pending since 2026-08-15T08:25:59.868Z (last status: running)" "$CASE_TMP/run.log"
+  local dir="$WORKSPACE/$FOLDER/releases/2026-08-15-2.31.0"
+  check_file "REPORT.md written by the sync job" "$dir/REPORT.md"
+  check_file "diff.json written" "$dir/diff.json"
+  check_file "release.json written" "$dir/release.json"
+  check_file "evidence written at its path" "$dir/evidence/production-mcp/cr1c07-2.31.0.md"
+  check_eq "the folder holds the preliminary report" "preliminary" "$(jq -r '.stage' "$dir/diff.json")"
+  check_grep "the index row is the one a fresh delivery writes" "| 2026-08-15 | 2.31.0 | [$rid](2026-08-15-2.31.0/REPORT.md) | Ready | preliminary |" "$WORKSPACE/$FOLDER/releases/index.md"
+  check_dirs_equal "latest/ is the release directory" "$dir" "$WORKSPACE/$FOLDER/latest"
+  check_no_path "the pending record is cleared (the file goes with its last entry)" "$pending"
+  check_eq "committed exactly as a fresh delivery" \
+    "Verging Memory CI: report for 2.31.0 ($rid): Ready" \
+    "$(git -C "$ORIGIN" log -1 --format=%s main)"
+  check_eq "the pending record is gone from the branch" "" "$(git -C "$ORIGIN" ls-tree -r --name-only main | grep -F pending.json || true)"
+  check_eq "nothing was submitted by the sync job" "0" "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
+  check_no_grep "no error in the sync job" "::error::" "$CASE_TMP/run.log"
+  check_grep "the sync job summary carries the verdict" "### Release verdict: Ready" "$GITHUB_STEP_SUMMARY"
+  run_step run_release.sh;     check_exit "run_release is a no-op in sync mode" 0 "$STEP_EXIT"
+  end_case
+}
+
+case_pending_running_then_failed() {
+  begin_case "a pending release still being tested stays on record; one that failed gets its index line and is cleared, and the job stays green"
+  local rid="run_20260826_5e6f7a8b9c0d"
+  start_mock "$(jq -n --arg rid "$rid" '{statuses: [
+    {release_id: $rid, status: "running", updated_at: "2026-08-15T09:00:00Z"},
+    {release_id: $rid, status: "failed", failure: "we could not reach your endpoint from the agent environment"}
+  ]}')" || { end_case; return; }
+  setup_env
+  make_repos
+  seed_pending_release "$rid" "2.31.0" "2026-08-15T08:25:59.868Z"
+  unset VERGING_ENVIRONMENTS
+  export VERGING_MODE="sync"
+  local pending="$WORKSPACE/$FOLDER/releases/pending.json"
+
+  # 1. Still being tested: left on record, nothing committed.
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh;       check_exit "reconcile exits 0 while the release is still being tested" 0 "$STEP_EXIT"
+  check_grep "the log says it is still being tested" "Release $rid (2.31.0) is still being tested (status: running); leaving it on record as pending." "$CASE_TMP/run.log"
+  check_file "the pending record stays" "$pending"
+  check_eq "the entry is untouched" "running" "$(jq -r --arg rid "$rid" '.[$rid].status' "$pending")"
+  check_eq "nothing was committed" \
+    "Verging Memory CI: release 2.31.0 ($rid) is pending; the report follows" \
+    "$(git -C "$ORIGIN" log -1 --format=%s main)"
+
+  # 2. Failed on the Verging side: the index says so, the entry goes, green.
+  new_job
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh;       check_exit "reconcile exits 0 on a failed pending release: no red job" 0 "$STEP_EXIT"
+  check_no_grep "no error anywhere in the job" "::error::" "$CASE_TMP/run.log"
+  check_grep "the failure is a warning with the failure text" "::warning::release $rid (2.31.0) failed on the Verging side: we could not reach your endpoint from the agent environment" "$CASE_TMP/run.log"
+  check_grep "the voided copy is printed" "The release is voided; voided tests are never billed." "$CASE_TMP/run.log"
+  check_no_path "the pending record is cleared" "$pending"
+  check_grep "the index notes the failure on the release's own row" "| 2026-08-15 | 2.31.0 | $rid | Failed: we could not reach your endpoint from the agent environment | failed |" "$WORKSPACE/$FOLDER/releases/index.md"
+  check_no_path "no release directory for a failed release" "$WORKSPACE/$FOLDER/releases/2026-08-15-2.31.0"
+  check_no_path "no latest/ for a failed release" "$WORKSPACE/$FOLDER/latest"
+  check_eq "the failure line is committed and pushed" \
+    "Verging Memory CI: release 2.31.0 ($rid) failed on the Verging side" \
+    "$(git -C "$ORIGIN" log -1 --format=%s main)"
+  check_grep "the job summary says which release failed" "failed on the Verging side" "$GITHUB_STEP_SUMMARY"
+  end_case
+}
+
+case_fetch_only_pending() {
+  begin_case "fetch_only_release_id on a release still being tested: green, on record as pending from its status body"
+  local rid="run_20260810_ffeeddccbbaa"
+  start_mock "$(jq -n --arg rid "$rid" '{status_by_id: {($rid): [
+    {release_id: $rid, status: "running", vendor_version: "2.30.9", received_at: "2026-08-10T09:00:00.000Z",
+     environments: {count: 1, agent_setups: ["Production MCP"], suites: ["Core Recall"]}}
+  ]}}')" || { end_case; return; }
+  setup_env
+  make_repos
+  export VERGING_FETCH_ONLY_RELEASE_ID="$rid"
+  export VERGING_POLL_TIMEOUT_MINUTES="0"
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh;       check_exit "reconcile exits 0" 0 "$STEP_EXIT"
+  run_step run_release.sh;     check_exit "run_release exits 0 when the deadline passes" 0 "$STEP_EXIT"
+  run_step commit_push.sh;     check_exit "commit_push exits 0" 0 "$STEP_EXIT"
+  run_step surfaces.sh;        check_exit "surfaces exits 0" 0 "$STEP_EXIT"
+  run_step set_outputs.sh;     check_exit "set_outputs exits 0: the job is green" 0 "$STEP_EXIT"
+
+  check_eq "nothing was submitted" "0" "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
+  check_grep "the exact notice is emitted" "$(pending_notice "$rid" running)" "$CASE_TMP/run.log"
+  check_no_grep "no error anywhere in the job" "::error::" "$CASE_TMP/run.log"
+  check_eq "the pending entry comes from the status body" \
+    '{"vendor_version":"2.30.9","environments":["Production MCP"],"submitted_at":"2026-08-10T09:00:00.000Z","status":"running"}' \
+    "$(jq -c --arg rid "$rid" '.[$rid]' "$WORKSPACE/$FOLDER/releases/pending.json")"
+  check_grep "output verdict is Pending" "verdict=Pending" "$GITHUB_OUTPUT"
+  check_eq "the pending record is committed with the status body's version" \
+    "Verging Memory CI: release 2.30.9 ($rid) is pending; the report follows" \
+    "$(git -C "$ORIGIN" log -1 --format=%s main)"
+  check_grep "check run conclusion is neutral" "conclusion=neutral" "$GH_SHIM_LOG"
+  end_case
+}
+
+case_pending_after_fetch_failure() {
+  begin_case "a job that fails after the receipt still commits the pending record, and the next release job collects the report first"
+  local rid="run_20260815_186efbad9769"
+  # report_ready, but the report route refuses: the job is red, as before.
+  start_mock "$(happy_scenario "$rid" | jq --arg rid "$rid" 'del(.report) | .statuses = [{release_id: $rid, status: "report_ready", corrections_due_by: "2026-08-18"}]')" || { end_case; return; }
+  setup_env
+  make_repos
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh;       check_exit "reconcile exits 0" 0 "$STEP_EXIT"
+  run_step run_release.sh;     check_exit "run_release exits 1 when the report cannot be fetched" 1 "$STEP_EXIT"
+  check_grep "the error names the report route" "::error::GET /v1/releases/$rid/report returned HTTP 409" "$CASE_TMP/run.log"
+  run_step commit_push.sh;     check_exit "commit_push exits 0" 0 "$STEP_EXIT"
+  check_eq "only the pending record is committed" \
+    "Verging Memory CI: release 2.31.0 ($rid) is pending; the report follows" \
+    "$(git -C "$ORIGIN" log -1 --format=%s main)"
+  check_eq "the commit carries the pending record and nothing else" "$FOLDER/releases/pending.json" "$(git -C "$ORIGIN" show --name-only --format= main)"
+  check_eq "the entry carries the last status seen" "report_ready" "$(jq -r --arg rid "$rid" '.[$rid].status' "$WORKSPACE/$FOLDER/releases/pending.json")"
+
+  # The next push: a release job whose reconcile pass collects the report
+  # before this job's own release is resolved any further.
+  new_job
+  set_scenario "$(happy_scenario "$rid" | jq --arg rid "$rid" '.statuses = [{release_id: $rid, status: "report_ready", corrections_due_by: "2026-08-18"}]')"
+  export VERGING_VENDOR_VERSION="2.32.0"
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh;       check_exit "reconcile exits 0" 0 "$STEP_EXIT"
+  local dir="$WORKSPACE/$FOLDER/releases/2026-08-15-2.31.0"
+  check_file "the pending release's report is written" "$dir/REPORT.md"
+  check_eq "the pending release's report is committed as a fresh delivery" \
+    "Verging Memory CI: report for 2.31.0 ($rid): Ready" \
+    "$(git -C "$ORIGIN" log -1 --format=%s main)"
+  check_no_path "the pending record is cleared" "$WORKSPACE/$FOLDER/releases/pending.json"
+  check_eq "this job's own vendor_version is left as resolved" "2.32.0" "$(cat "$RUNNER_TEMP/verging-memory-ci-state/vendor_version")"
+  check_eq "this job carries no release id from the collected report" "" "$(cat "$RUNNER_TEMP/verging-memory-ci-state/release_id" 2>/dev/null || true)"
+  check_eq "nothing was submitted by the reconcile pass" "0" "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
+  unset VERGING_VENDOR_VERSION
+  end_case
+}
+
+case_pending_older_than_latest() {
+  begin_case "a pending report older than the newest on record: its index row goes in date order and latest/ stays with the newer release"
+  local old="run_20260810_0123456789ab" newer="run_20260814_aaaabbbbcccc"
+  local old_md newer_md
+  old_md="$(make_report_md "Larkspur 2.29.0" "Ready" "Preliminary report")"
+  newer_md="$(make_report_md "Larkspur 2.30.0" "Not ready: 2 accuracy failures" "Preliminary report")"
+  start_mock "$(jq -n --arg old "$old" --arg newer "$newer" --arg old_md "$old_md" --arg newer_md "$newer_md" '{
+    status_by_id: {($old): [{release_id: $old, status: "report_ready", received_at: "2026-08-10T09:00:00.000Z"}]},
+    report_by_id: {
+      ($old): {release_id: $old, status: "report_ready", vendor_version: "2.29.0", scope: {suites: ["core-recall"]},
+               corrections_due_by: "2026-08-11", report_markdown: $old_md,
+               diff: {format: "release-diff/v1", release_verdict: "ready", stage: "preliminary"}, evidence: []},
+      ($newer): {release_id: $newer, status: "report_ready", vendor_version: "2.30.0", scope: {suites: ["core-recall"]},
+               corrections_due_by: "2026-08-17", report_markdown: $newer_md,
+               diff: {format: "release-diff/v1", release_verdict: "not_ready", stage: "preliminary"}, evidence: []}
+    }
+  }')" || { end_case; return; }
+  setup_env
+  make_repos
+  seed_preliminary_release "$newer"
+  seed_pending_release "$old" "2.29.0" "2026-08-10T09:00:00.000Z"
+  unset VERGING_ENVIRONMENTS
+  export VERGING_MODE="sync"
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh;       check_exit "reconcile exits 0" 0 "$STEP_EXIT"
+  local index="$WORKSPACE/$FOLDER/releases/index.md"
+  check_file "the older release's report is written" "$WORKSPACE/$FOLDER/releases/2026-08-10-2.29.0/REPORT.md"
+  check_grep "the older release has its row" "| 2026-08-10 | 2.29.0 | [$old](2026-08-10-2.29.0/REPORT.md) | Ready | preliminary |" "$index"
+  check_eq "the index stays oldest first" "1" \
+    "$([ "$(grep -nF "[$old](" "$index" | cut -d: -f1)" -lt "$(grep -nF "[$newer](" "$index" | cut -d: -f1)" ] && echo 1 || echo 0)"
+  check_eq "latest/ stays with the newer release" "$newer" "$(jq -r '.release_id' "$WORKSPACE/$FOLDER/latest/release.json")"
+  check_grep "the log says why latest/ was left" "latest/ left as it is: a newer release's report is already on record." "$CASE_TMP/run.log"
+  check_no_path "the pending record is cleared" "$WORKSPACE/$FOLDER/releases/pending.json"
+  check_grep "the newer release's preliminary report is left in place (no final yet)" "The final report for $newer is not out yet" "$CASE_TMP/run.log"
+  end_case
+}
+
 # ---------- run ----------
 
 say "Verging Memory CI action test harness"
@@ -1101,6 +1374,11 @@ case_other_409_fails
 case_evidence_paths
 case_reconcile
 case_sync_mode
+case_timeout_pending
+case_pending_running_then_failed
+case_fetch_only_pending
+case_pending_after_fetch_failure
+case_pending_older_than_latest
 case_push_retry
 case_push_fallback
 case_surfaces

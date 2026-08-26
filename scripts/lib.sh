@@ -229,12 +229,19 @@ ensure_index() {
     {
       echo "# Releases"
       echo
-      echo "One line per release, oldest first. Each release id links to its report."
+      echo "One line per release, oldest first. Each release id links to its report; a release that failed on the Verging side has no report and says so."
       echo
       echo "| Date (UTC) | vendor_version | Release id | Release verdict | Stage |"
       echo "|---|---|---|---|---|"
     } > "$index"
   fi
+}
+
+# index_row_line INDEX RELEASE_ID: the line number of the row that carries
+# RELEASE_ID (linked to its report, or bare on a row without one), or empty.
+index_row_line() {
+  [ -f "$1" ] || return 0
+  { grep -nF -e "[$2](" -e "| $2 |" "$1" || true; } | head -n 1 | cut -d: -f1
 }
 
 # index_update_row FOLDER RELEASE_ID NEW_ROW: replace the index line that
@@ -246,7 +253,7 @@ index_update_row() {
     echo "::warning::$index does not exist; cannot update the row for $id"
     return 0
   fi
-  line="$(grep -nF "[$id](" "$index" | head -n 1 | cut -d: -f1)"
+  line="$(index_row_line "$index" "$id")"
   if [ -z "$line" ]; then
     echo "::warning::no index row found for $id; appending one instead"
     printf '%s\n' "$new_row" >> "$index"
@@ -259,6 +266,135 @@ index_update_row() {
     tail -n "+$((line + 1))" "$index"
   } > "$tmp"
   mv "$tmp" "$index"
+}
+
+# index_put_row FOLDER RELEASE_ID ROW: the one way a row reaches the index.
+# A row already carrying RELEASE_ID is replaced in place; otherwise ROW goes
+# in date order, before the first row dated later than it, so a report that
+# lands after a newer release's (a release a job stopped waiting for, or one
+# fetched by hand) keeps the index oldest first.
+index_put_row() {
+  local folder="$1" id="$2" row="$3" index tmp date
+  index="$folder/releases/index.md"
+  ensure_index "$folder"
+  if [ -n "$(index_row_line "$index" "$id")" ]; then
+    index_update_row "$folder" "$id" "$row"
+    return 0
+  fi
+  date="$(printf '%s' "$row" | awk -F'|' '{gsub(/^ +| +$/, "", $2); print $2}')"
+  tmp="$(state_dir)/index.tmp"
+  ROW="$row" DATE="$date" awk '
+    BEGIN { done = 0 }
+    !done && /^\| [0-9]/ {
+      split($0, c, "|"); d = c[2]; gsub(/^ +| +$/, "", d)
+      if (d > ENVIRON["DATE"]) { print ENVIRON["ROW"]; done = 1 }
+    }
+    { print }
+    END { if (!done) print ENVIRON["ROW"] }
+  ' "$index" > "$tmp" && mv "$tmp" "$index"
+}
+
+# index_newest_date FOLDER: the latest date on any index row, or empty.
+index_newest_date() {
+  [ -f "$1/releases/index.md" ] || return 0
+  { grep -E '^\| [0-9]{4}-' "$1/releases/index.md" || true; } \
+    | awk -F'|' '{gsub(/^ +| +$/, "", $2); print $2}' | sort | tail -n 1
+}
+
+# ---------------------------------------------------------------------------
+# THE PENDING RECORD: <folder>/releases/pending.json, one JSON object keyed
+# by release id, one entry per release whose report has not reached the
+# folder yet:
+#
+#   {"<release_id>": {"vendor_version": "2.31.0",
+#                     "environments": ["staging-mcp"],
+#                     "submitted_at": "2026-08-26T09:12:04.118Z",
+#                     "status": "running"}}
+#
+# The entry is written right after the 202 receipt, its status is brought up
+# to date when the job stops waiting, and it is committed with the folder.
+# The reconcile pass at the start of every job (release and sync alike)
+# reads it, and the entry is cleared the moment the release's report reaches
+# the folder or the release fails on the Verging side. The file is removed
+# when its last entry goes.
+pending_path() {
+  printf '%s/releases/pending.json' "$1"
+}
+
+# pending_set FOLDER RELEASE_ID ENTRY_JSON: add or replace one entry.
+pending_set() {
+  local folder="$1" id="$2" entry="$3" f tmp
+  f="$(pending_path "$folder")"
+  mkdir -p "$folder/releases"
+  if [ -f "$f" ] && ! jq -e 'type == "object"' "$f" >/dev/null 2>&1; then
+    echo "::warning::$f is not a JSON object; starting it over"
+  fi
+  jq -e 'type == "object"' "$f" >/dev/null 2>&1 || printf '{}\n' > "$f"
+  tmp="$(state_dir)/pending.tmp"
+  jq --arg id "$id" --argjson entry "$entry" '.[$id] = $entry' "$f" > "$tmp" && mv "$tmp" "$f"
+}
+
+# pending_get FOLDER RELEASE_ID: the entry as one JSON line, or empty.
+pending_get() {
+  local f
+  f="$(pending_path "$1")"
+  [ -f "$f" ] || return 0
+  jq -c --arg id "$2" '.[$id] // empty' "$f" 2>/dev/null || true
+}
+
+# pending_set_status FOLDER RELEASE_ID STATUS: bring an entry's last status
+# up to date. No-op when the release is not on record.
+pending_set_status() {
+  local entry
+  entry="$(pending_get "$1" "$2")"
+  [ -n "$entry" ] || return 0
+  pending_set "$1" "$2" "$(printf '%s' "$entry" | jq -c --arg s "$3" '.status = $s')"
+}
+
+# pending_clear FOLDER RELEASE_ID: drop the entry; drop the file when empty.
+pending_clear() {
+  local f tmp
+  f="$(pending_path "$1")"
+  [ -f "$f" ] || return 0
+  jq -e 'type == "object"' "$f" >/dev/null 2>&1 || return 0
+  tmp="$(state_dir)/pending.tmp"
+  jq --arg id "$2" 'del(.[$id])' "$f" > "$tmp" && mv "$tmp" "$f"
+  if [ "$(jq 'length' "$f")" = "0" ]; then
+    rm -f "$f"
+  fi
+}
+
+# pending_ids FOLDER: every release id on record, oldest submission first.
+pending_ids() {
+  local f
+  f="$(pending_path "$1")"
+  [ -f "$f" ] || return 0
+  jq -r 'to_entries | sort_by(.value.submitted_at // "") | .[].key' "$f" 2>/dev/null || true
+}
+
+# stop_waiting RELEASE_ID LAST_STATUS: the deadline passed before the report
+# was ready. Nothing here is an error: the release stays on record as pending
+# with its last status, this job ends green with the verdict "Pending" and no
+# report path, and the notice says what happens next.
+stop_waiting() {
+  local id="$1" status="$2" folder
+  folder="$(state_get folder)"
+  pending_set_status "$folder" "$id" "$status"
+  ensure_folder_readme "$folder"
+  state_set release_id "$id"
+  state_set verdict "Pending"
+  state_set report_path ""
+  state_set last_status "$status"
+  echo "::notice::Verging Labs is still testing release $id (last status: $status). This job stops waiting; your next push or the sync job commits the report when it is ready. To wait longer, set poll_timeout_minutes."
+  echo "The release is on record in $folder/releases/pending.json; nothing to recover by hand. To fetch the report on demand once it is ready, re-run with fetch_only_release_id=$id."
+  {
+    echo "### Report pending"
+    echo
+    echo "Verging Labs is still testing release \`$id\` (last status: \`$status\`). This job stops waiting; your next push or the sync job commits the report when it is ready. To wait longer, set \`poll_timeout_minutes\`."
+    echo
+    echo "The release is on record in \`$folder/releases/pending.json\`."
+    echo
+  } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 }
 
 # refresh_latest FOLDER DIR: latest/ is a plain copy of the newest release
@@ -278,18 +414,23 @@ ensure_folder_readme() {
 }
 
 # poll_release RELEASE_ID TIMEOUT_MINUTES: poll the status until the report
-# is ready. Returns 0 on report_ready or corrected, 1 on failed or timeout.
+# is ready. Returns 0 on report_ready or corrected, 1 on failed, and 2 when
+# the deadline passes first: that is not an error, the caller records the
+# release as pending (stop_waiting) and the job ends green. The last status
+# seen is left in the state as last_status.
 poll_release() {
   local id="$1" timeout_min="$2" interval="${POLL_INTERVAL_SECONDS:-30}"
   local status_file deadline status code failure
   status_file="$(state_dir)/status.json"
   deadline=$(( $(date +%s) + timeout_min * 60 ))
   status="unknown"
-  echo "Polling $(state_get api_base)/v1/releases/$id every ${interval}s for up to ${timeout_min} minutes"
+  state_set last_status "$status"
+  echo "Polling $(state_get api_base)/v1/releases/$id every ${interval}s for up to ${timeout_min} minute(s)"
   while :; do
     code="$(api_get "/v1/releases/$id" "$status_file")"
     if [ "$code" = "200" ]; then
       status="$(jq -r '.status // "unknown"' "$status_file")"
+      state_set last_status "$status"
       echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  status=$status  updated_at=$(jq -r '.updated_at // "-"' "$status_file")"
       case "$status" in
         report_ready|corrected)
@@ -321,21 +462,21 @@ poll_release() {
       print_error_body "$status_file"
     fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
-      echo "::error::release $id is not report_ready after ${timeout_min} minutes (last status: $status). This job stops polling; the release may still finish on the Verging side. Do not start another release for the same version; send Verging the release_id, or re-run this workflow with fetch_only_release_id=$id once the report is ready, to fetch and commit it without submitting again."
-      {
-        echo "**Timed out waiting for the report.** \`$id\` last status: \`$status\`"
-      } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-      return 1
+      echo "Release $id is not report_ready after ${timeout_min} minute(s); last status: $status."
+      return 2
     fi
     sleep "$interval"
   done
 }
 
-# fetch_and_write RELEASE_ID RELEASE_DATE: fetch the report and write the
-# release directory, latest/, the index row, and the folder README. Records
-# vendor_version, verdict, slug, and report_path in the step state.
+# fetch_and_write RELEASE_ID RELEASE_DATE [keep-latest]: fetch the report
+# and write the release directory, latest/, the index row, and the folder
+# README, and clear the release from the pending record. Records
+# vendor_version, verdict, slug, and report_path in the step state. With
+# "keep-latest" the latest/ copy is left alone: the reconcile pass passes it
+# when a newer release's report is already on record.
 fetch_and_write() {
-  local id="$1" release_date="$2"
+  local id="$1" release_date="$2" latest_mode="${3:-}"
   local folder report code vendor_version slug dir verdict stage rstatus due
   folder="$(state_get folder)"
   report="$(state_dir)/report.json"
@@ -353,7 +494,11 @@ fetch_and_write() {
   slug="$(slug_for "$release_date" "$vendor_version" "$id" "$folder")"
   dir="$folder/releases/$slug"
   write_release_dir "$report" "$dir" || return 1
-  refresh_latest "$folder" "$dir"
+  if [ "$latest_mode" = "keep-latest" ]; then
+    echo "latest/ left as it is: a newer release's report is already on record."
+  else
+    refresh_latest "$folder" "$dir"
+  fi
   ensure_folder_readme "$folder"
 
   verdict="$(extract_verdict "$report" "$dir/REPORT.md")"
@@ -363,15 +508,10 @@ fetch_and_write() {
   echo "Release verdict: $verdict"
   echo "Stage: $stage   status: $rstatus   corrections_due_by: $due"
 
-  ensure_index "$folder"
-  if grep -qF "[$id](" "$folder/releases/index.md"; then
-    index_update_row "$folder" "$id" \
-      "| $release_date | $vendor_version | [$id]($slug/REPORT.md) | $verdict | $stage |"
-  else
-    printf '| %s | %s | [%s](%s/REPORT.md) | %s | %s |\n' \
-      "$release_date" "$vendor_version" "$id" "$slug" "$verdict" "$stage" \
-      >> "$folder/releases/index.md"
-  fi
+  index_put_row "$folder" "$id" \
+    "| $release_date | $vendor_version | [$id]($slug/REPORT.md) | $verdict | $stage |"
+  # The report is in the folder: the release is no longer pending.
+  pending_clear "$folder" "$id"
 
   state_set vendor_version "$vendor_version"
   state_set release_id "$id"
@@ -442,15 +582,8 @@ fetch_and_write_wiring() {
   ensure_folder_readme "$folder"
   echo "Wiring check $id: page written to $dir/REPORT.md. Nothing was tested and nothing is billed."
 
-  ensure_index "$folder"
-  if grep -qF "[$id](" "$folder/releases/index.md"; then
-    index_update_row "$folder" "$id" \
-      "| $release_date | $vendor_version | [$id]($slug/REPORT.md) | Wiring check | wiring |"
-  else
-    printf '| %s | %s | [%s](%s/REPORT.md) | %s | %s |\n' \
-      "$release_date" "$vendor_version" "$id" "$slug" "Wiring check" "wiring" \
-      >> "$folder/releases/index.md"
-  fi
+  index_put_row "$folder" "$id" \
+    "| $release_date | $vendor_version | [$id]($slug/REPORT.md) | Wiring check | wiring |"
 
   state_set vendor_version "$vendor_version"
   state_set release_id "$id"

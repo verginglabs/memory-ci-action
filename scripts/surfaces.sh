@@ -42,6 +42,12 @@ wiring_line() {
   fi
 }
 
+# pending_line: the one line both surfaces say when this job stopped waiting
+# before the report was ready. Not a verdict: the report follows later.
+pending_line() {
+  printf '%s' "Verging Labs is still testing release \`$release_id\` (last status: $(state_get last_status)). Your next push or the sync job commits the report when it is ready."
+}
+
 conclusion="neutral"
 title="$verdict"
 summary="Release \`$release_id\`. Report: \`$report_path\`."
@@ -49,11 +55,17 @@ case "$verdict" in
   Ready*) conclusion="success" ;;
 esac
 wiring="$(state_get wiring_done)"
+pending=""
 if [ "$wiring" = "1" ]; then
   # A wiring check is not a verdict: conclusion neutral (never a failure),
   # and the one line above in place of a verdict.
   title="Wiring check, not a release"
   summary="$(wiring_line "\`$report_path\`")"
+elif [ "$verdict" = "Pending" ]; then
+  # No report yet is not a verdict either: conclusion neutral, one line.
+  pending="1"
+  title="Report pending"
+  summary="$(pending_line)"
 fi
 
 if [ -n "$repo" ] && [ -n "$head_sha" ]; then
@@ -81,6 +93,9 @@ if [ "$event" = "pull_request" ] && [ -n "$pr_number" ] && [ -n "$repo" ]; then
   if [ "$wiring" = "1" ]; then
     body="<!-- verging-memory-ci -->
 **Verging Memory CI: wiring check, not a release.** $(wiring_line "[read it]($link)")"
+  elif [ "$pending" = "1" ]; then
+    body="<!-- verging-memory-ci -->
+**Verging Memory CI: report pending.** $(pending_line)"
   else
     body="<!-- verging-memory-ci -->
 **Verging Memory CI: $verdict**

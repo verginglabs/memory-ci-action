@@ -39,13 +39,13 @@ jobs:
       - uses: verginglabs/memory-ci-action@v1
         with:
           api_key: ${{ secrets.VERGING_API_KEY }}
-          environments: "Production MCP,Agent SDK"
+          environments: "Claude Code Opus 5,Hermes GPT-5.6 Luna"
           product_name: "Acme Recall"
           suites: core-recall,preference-adherence,truth-maintenance
           fetch_only_release_id: ${{ inputs.fetch_only_release_id }}
 ```
 
-Set the repository secret `VERGING_API_KEY` to the API key issued during onboarding. Never paste the key directly into the workflow or commit it to the repository.
+Set the repository secret `VERGING_API_KEY` to the API key issued during onboarding. Never paste the key directly into the workflow or commit it to the repository. Nothing else needs the key: your coding agent adds the workflow file and pushes, and the first push performs the free wiring check on its own.
 
 That is the whole install.
 
@@ -60,12 +60,24 @@ in place of a verdict. Verging Labs tells you when your suites are set up;
 pushes after that run real releases. To repeat the wiring check at any time,
 pass the input `wiring_check: "true"`.
 
-## The final report
+## How long a job waits
 
-When a preliminary report needs correction, the final report replaces it in
-your repository when ready. Automatic: your next job commits it before
-submitting anything.
-On demand and on a schedule: this second workflow.
+Testing a release usually takes one to three hours on the Verging side. The
+job waits for `poll_timeout_minutes` (45 by default) and then ends green:
+a notice says "Verging Labs is still testing release <id>", the release is
+recorded in `Verging Memory CI/releases/pending.json`, the `verdict` output
+is `Pending`, and the `report_path` output is empty. The report is committed
+by the next job on any push, or by the sync workflow below, once it is ready.
+To have the report land on the same job, raise `poll_timeout_minutes`; a
+waiting job spends Actions minutes.
+
+## Reports that land later
+
+Two kinds of report land after the job that submitted the release: the
+preliminary report of a release the job stopped waiting for, and the final
+report that replaces a preliminary report when it needed correction. Both are
+committed by your next job before it submits anything, and by this second
+workflow on demand or on a schedule.
 
 Add this second workflow file next to the first. It uses the same `VERGING_API_KEY` secret:
 

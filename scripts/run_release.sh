@@ -60,7 +60,7 @@ if [ -n "$fetch_only" ]; then
     failed)
       failure="$(jq -r '.failure // "(no failure field on the status body)"' "$status_file")"
       echo "::error::release $id failed on the Verging side: $failure"
-      echo "The release is voided; voided tests are never billed. Start a new release, or send Verging the release_id."
+      echo "The release is voided; voided tests are never billed. Start a new release, or send the release_id to contact@verginglabs.com."
       exit 1
       ;;
     *)
@@ -97,7 +97,7 @@ if [ -n "$suites_json" ]; then
   args+=(--argjson suites "$suites_json")
   filter="$filter + {suites: \$suites}"
 else
-  echo "No suites selected: this release runs all the suites chosen for your account."
+  echo "No suites selected: this release runs all the suites chosen for your account and set up on every named agent setup."
 fi
 if [ -n "$product_name" ]; then
   args+=(--arg product_name "$product_name")
@@ -228,7 +228,7 @@ jq -r '
   "  release_id:     \(.release_id)",
   "  received_at:    \(.received_at // "(not given)")",
   "  status:         \(.status // "(receipt carries no status field; queued per the 202)")",
-  "  scope:          \(if .scope == null then "null (all the suites chosen for your account)" else (.scope | tojson) end)",
+  "  scope:          \(if .scope == null then "null (all suites chosen and set up on every named setup)" else (.scope | tojson) end)",
   "  scope_summary:  \(.scope_summary // "(not given)")",
   "  status_url:     \(.status_url // "(not given)")",
   "  message:        \(.message // "(not given)")"

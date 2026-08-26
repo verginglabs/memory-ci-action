@@ -62,7 +62,7 @@ pass the input `wiring_check: "true"`.
 
 ## How long a job waits
 
-Testing a release usually takes one to three hours on the Verging side. The
+A release is usually still being tested when the default wait passes. The
 job waits for `poll_timeout_minutes` (45 by default) and then ends green:
 a notice says "Verging Labs is still testing release <id>", the release is
 recorded in `Verging Memory CI/releases/pending.json`, the `verdict` output

@@ -162,7 +162,7 @@ make_report_md() { # $1 tested line, $2 verdict, $3 stage words
 
 happy_scenario() { # $1 release id
   local md
-  md="$(make_report_md "Larkspur 2.31.0" "Ready" "Preliminary report (the final report follows by next business day)")"
+  md="$(make_report_md "Larkspur 2.31.0" "Ready" "Preliminary report (the final report follows)")"
   jq -n --arg md "$md" --arg rid "$1" '{
     receipt: {
       release_id: $rid,
@@ -646,7 +646,7 @@ case_other_409_fails() {
 seed_preliminary_release() { # $1 release id; seeds and pushes a preliminary report
   local rid="$1" dir="$WORKSPACE/$FOLDER/releases/2026-08-14-2.30.0"
   mkdir -p "$dir/evidence"
-  make_report_md "Larkspur 2.30.0" "Not ready: 2 accuracy failures" "Preliminary report (the final report follows by next business day)" > "$dir/REPORT.md"
+  make_report_md "Larkspur 2.30.0" "Not ready: 2 accuracy failures" "Preliminary report (the final report follows)" > "$dir/REPORT.md"
   jq -n --arg rid "$rid" '{format: "release-diff/v1", verdict: "regressions_found",
     cost_verdict: "pass", release_verdict: "not_ready", stage: "preliminary",
     release_id: $rid}' > "$dir/diff.json"
@@ -890,7 +890,7 @@ case_evidence_paths() {
   begin_case "evidence files land at the exact paths the report names, and nothing else is written"
   local rid="run_20260820_d55af6c7f6b3"
   local md scenario
-  md="$(make_report_md "Larkspur 2.31.0" "Not ready: 1 accuracy failure" "Preliminary report (the final report follows by next business day)")"
+  md="$(make_report_md "Larkspur 2.31.0" "Not ready: 1 accuracy failure" "Preliminary report (the final report follows)")"
   # Three names the API emits, and four it never emits. A run that writes
   # the three and refuses the four is the whole point of this case: the
   # earlier writer refused all seven, said it had written seven, and ended

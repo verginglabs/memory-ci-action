@@ -10,11 +10,11 @@ inputs:
     description: "Your Verging Memory CI API key, issued at onboarding. Pass it from a repository secret."
     required: true
   environments:
-    description: "The agent setup(s) to test, as you named them at onboarding or via POST /v1/environments. One name or several; several are tested together in one release, one report with a per-setup section for each. Separate names with commas and/or newlines, e.g. \"staging-mcp\" or \"staging-mcp,prod-mcp\". Each name: letters, digits, spaces, dots, underscores, plus signs, and hyphens only; single spaces between words, none at the start or the end; up to 64 characters; must not start with a hyphen."
+    description: "The agent setup(s) to test, as you named them at onboarding or via POST /v1/environments. One name or several; several are tested together in one release, one report with a per-setup section for each. Separate names with commas and/or newlines, e.g. \"Claude Code Opus 5\" or \"Claude Code Opus 5,Hermes GPT-5.6 Luna\". Each name: letters, digits, spaces, dots, underscores, plus signs, and hyphens only; single spaces between words, none at the start or the end; up to 64 characters; must not start with a hyphen."
     required: false
     default: ""
   suites:
-    description: "Comma separated test suite values, e.g. core-recall,truth-maintenance. Omit it (the default) to run all the suites chosen for your account; set specific values to scope a release to those suites."
+    description: "Comma separated test suite values, e.g. core-recall,truth-maintenance. Omit it (the default) to run all the suites chosen for your account and set up on every named agent setup (several setups run their intersection); set specific values to scope a release to those suites."
     required: false
     default: ""
   vendor_version:
@@ -46,7 +46,7 @@ inputs:
     required: false
     default: "release"
   poll_timeout_minutes:
-    description: "How many minutes the job waits for the report. Testing a release usually takes one to three hours on the Verging side, so the default (45) often passes first: the job then ends green with the verdict output `Pending`, the release is recorded in the report folder's releases/pending.json, and the next job on any push, or a mode: sync job, commits the report once it is ready. Raise it to have the report land on the same job (a waiting job spends Actions minutes); 0 stops waiting right after the receipt."
+    description: "How many minutes the job waits for the report. A release is often still being tested when the default (45) passes: the job then ends green with the verdict output `Pending`, the release is recorded in the report folder's releases/pending.json, and the next job on any push, or a mode: sync job, commits the report once it is ready. Raise it to have the report land on the same job (a waiting job spends Actions minutes); 0 stops waiting right after the receipt."
     required: false
     default: "45"
 

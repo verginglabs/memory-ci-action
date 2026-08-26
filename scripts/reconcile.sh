@@ -112,7 +112,7 @@ for id in $(pending_ids "$folder"); do
       ;;
     failed)
       failure="$(jq -r '.failure // "(no failure field on the status body)"' "$status_file")"
-      echo "::warning::release $id ($version) failed on the Verging side: $failure. The release is voided; voided tests are never billed. Start a new release, or send Verging the release_id."
+      echo "::warning::release $id ($version) failed on the Verging side: $failure. The release is voided; voided tests are never billed. Start a new release, or send the release_id to contact@verginglabs.com."
       row_failure="$(printf '%s' "$failure" | tr '\n|' ' /')"
       index_put_row "$folder" "$id" "| $release_date | $version | $id | Failed: $row_failure | failed |"
       pending_clear "$folder" "$id"

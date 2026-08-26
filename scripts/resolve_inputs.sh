@@ -40,7 +40,7 @@ fi
 # one name or several, a list separated by commas and/or newlines. One name is
 # a one-item list; several are tested together in one release (parity with the
 # API, whose `environments` is an array). Each name follows the API's
-# display-name rule, so "Production MCP" is a name, not an error. Each also
+# display-name rule, so "Claude Code Opus 5" is a name, not an error. Each also
 # becomes a directory in the report folder, so the slug it produces is checked
 # here rather than after a report has been built.
 env_list="${VERGING_ENVIRONMENTS:-}"
@@ -68,7 +68,7 @@ fi
 environments_json="$(printf '%s' "$env_list" \
   | jq -Rsc 'split("\n") | map(split(",")) | add | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')"
 if [ "$environments_json" = "[]" ]; then
-  echo "::error::the environments input has no agent-setup names once the separators are removed; name at least one agent setup, e.g. \"staging-mcp\" or \"staging-mcp,prod-mcp\""
+  echo "::error::the environments input has no agent-setup names once the separators are removed; name at least one agent setup, e.g. \"Claude Code Opus 5\" or \"Claude Code Opus 5,Hermes GPT-5.6 Luna\""
   exit 1
 fi
 # The API refuses a repeated name; refuse it here too so it fails in seconds.

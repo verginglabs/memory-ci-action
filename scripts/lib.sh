@@ -60,7 +60,7 @@ git_config_identity() {
 #
 #   display-name rule, for product_name and the environment (agent setup)
 #   name. The slug charset PLUS single internal spaces, so institutional
-#   names like "Production MCP" and "Agent SDK" are accepted (ruled by
+#   names like "Claude Code Opus 5" and "Hermes GPT-5.6 Luna" are accepted (ruled by
 #   #472 D6 A). No leading or trailing space, no doubled space, still no
 #   leading hyphen, still 1 to 64 characters.
 #
@@ -307,7 +307,7 @@ index_newest_date() {
 # folder yet:
 #
 #   {"<release_id>": {"vendor_version": "2.31.0",
-#                     "environments": ["staging-mcp"],
+#                     "environments": ["Claude Code Opus 5"],
 #                     "submitted_at": "2026-08-26T09:12:04.118Z",
 #                     "status": "running"}}
 #
@@ -440,7 +440,7 @@ poll_release() {
         failed)
           failure="$(jq -r '.failure // "(no failure field on the status body)"' "$status_file")"
           echo "::error::release $id failed on the Verging side: $failure"
-          echo "The release is voided; voided tests are never billed. Start a new release, or send Verging the release_id."
+          echo "The release is voided; voided tests are never billed. Start a new release, or send the release_id to contact@verginglabs.com."
           {
             echo "**Release failed.** \`$id\`"
             echo

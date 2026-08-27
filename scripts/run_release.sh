@@ -83,16 +83,19 @@ fi
 
 # Normal run: submit the release (POST /v1/releases).
 vendor_version="$(state_get vendor_version)"
-environments_json="$(state_get environments_json)"
+agent_setups_json="$(state_get agent_setups_json)"
 suites_json="$(state_get suites_json)"
 product_name="$(state_get product_name)"
 
 args=(--arg vendor_version "$vendor_version")
 filter='{vendor_version: $vendor_version}'
-# The agent setup(s): the `environments` array (parity with the API), one name
-# or several. resolve_inputs.sh has already ensured it is set and non-empty.
-args+=(--argjson environments "$environments_json")
-filter="$filter + {environments: \$environments}"
+# The selected agent setups, when the workflow scopes them explicitly. Omitted
+# means the account defaults, which is also how the onboarding wiring check is
+# run before the final integration step adds trigger-specific setup selection.
+if [ "$agent_setups_json" != "[]" ]; then
+  args+=(--argjson agent_setups "$agent_setups_json")
+  filter="$filter + {agent_setups: \$agent_setups}"
+fi
 if [ -n "$suites_json" ]; then
   args+=(--argjson suites "$suites_json")
   filter="$filter + {suites: \$suites}"
@@ -160,7 +163,7 @@ submit_wiring_check() {
     echo "|---|---|"
     echo "| wiring check | \`$release_id\` |"
     echo "| vendor_version | \`$vendor_version\` |"
-    echo "| environments | \`$(printf '%s' "$environments_json" | jq -r 'join(", ")')\` |"
+    echo "| agent setups | \`$(printf '%s' "$agent_setups_json" | jq -r 'if length == 0 then "account defaults" else join(", ") end')\` |"
     echo "| received_at | $(jq -r '.received_at // "(not given)"' "$receipt") |"
     echo
   } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
@@ -247,10 +250,10 @@ submitted_at="$(jq -r '.received_at // empty' "$receipt")"
 [ -n "$submitted_at" ] || submitted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 pending_set "$folder" "$release_id" "$(jq -cn \
   --arg vendor_version "$vendor_version" \
-  --argjson environments "$environments_json" \
+  --argjson agent_setups "$agent_setups_json" \
   --arg submitted_at "$submitted_at" \
   --arg status "$(jq -r '.status // "queued"' "$receipt")" \
-  '{vendor_version: $vendor_version, environments: $environments, submitted_at: $submitted_at, status: $status}')"
+  '{vendor_version: $vendor_version, environments: $agent_setups, submitted_at: $submitted_at, status: $status}')"
 echo "Release $release_id is on record as pending in $folder/releases/pending.json until its report reaches the folder."
 
 {
@@ -259,7 +262,7 @@ echo "Release $release_id is on record as pending in $folder/releases/pending.js
   echo "| | |"
   echo "|---|---|"
   echo "| vendor_version | \`$vendor_version\` |"
-  echo "| environments | \`$(printf '%s' "$environments_json" | jq -r 'join(", ")')\` |"
+  echo "| agent setups | \`$(printf '%s' "$agent_setups_json" | jq -r 'if length == 0 then "account defaults" else join(", ") end')\` |"
   echo "| release_id | \`$release_id\` |"
   echo "| received_at | $(jq -r '.received_at // "(not given)"' "$receipt") |"
   echo "| scope | \`$(jq -c '.scope' "$receipt")\` |"

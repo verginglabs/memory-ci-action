@@ -9,8 +9,12 @@ inputs:
   api_key:
     description: "Your Verging Memory CI API key, issued at onboarding. Pass it from a repository secret."
     required: true
+  agent_setups:
+    description: "The agent setup(s) to test, as you named them at onboarding. One name or several, separated with commas and/or newlines. Omit to use the account defaults."
+    required: false
+    default: ""
   environments:
-    description: "The agent setup(s) to test, as you named them at onboarding or via POST /v1/environments. One name or several; several are tested together in one release, one report with a per-setup section for each. Separate names with commas and/or newlines, e.g. \"Claude Code Opus 5\" or \"Claude Code Opus 5,Hermes GPT-5.6 Luna\". Each name: letters, digits, spaces, dots, underscores, plus signs, and hyphens only; single spaces between words, none at the start or the end; up to 64 characters; must not start with a hyphen."
+    description: "Removed. Use agent_setups. If this legacy input is present, the Action stops with a migration error."
     required: false
     default: ""
   suites:
@@ -68,7 +72,8 @@ runs:
       shell: bash
       env:
         VERGING_API_KEY: ${{ inputs.api_key }}
-        VERGING_ENVIRONMENTS: ${{ inputs.environments }}
+        VERGING_AGENT_SETUPS: ${{ inputs.agent_setups }}
+        VERGING_LEGACY_ENVIRONMENTS: ${{ inputs.environments }}
         VERGING_SUITES: ${{ inputs.suites }}
         VERGING_VENDOR_VERSION: ${{ inputs.vendor_version }}
         VERGING_API_BASE: ${{ inputs.api_base }}

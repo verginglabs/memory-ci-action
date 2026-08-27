@@ -9,6 +9,14 @@ if [ -z "${VERGING_API_KEY:-}" ]; then
   exit 1
 fi
 
+# The retired input is declared only so an old workflow fails with a precise
+# migration message instead of GitHub's warning followed by an account-default
+# release. It is refused in every mode; it is never an alias.
+if [ -n "${VERGING_LEGACY_ENVIRONMENTS:-}" ]; then
+  echo "::error::the environments input was removed. Fix: replace environments with agent_setups; no compatibility alias is provided."
+  exit 1
+fi
+
 # mode: `release` (default) submits a release and collects its report; `sync`
 # submits nothing and lets the reconcile pass collect any reports now ready
 # for releases already in the report folder: the preliminary report of a
@@ -36,14 +44,14 @@ if [ "$mode" = "sync" ]; then
   echo "mode sync: nothing is submitted; the reconcile pass collects any reports now ready for releases already in the report folder (pending preliminary reports and final reports alike)."
   exit 0
 fi
-# The agent setup(s) this release runs in, named in the `environments` input:
+# The agent setup(s) this release runs in, named in the `agent_setups` input:
 # one name or several, a list separated by commas and/or newlines. One name is
 # a one-item list; several are tested together in one release (parity with the
-# API, whose `environments` is an array). Each name follows the API's
-# display-name rule, so "Claude Code Opus 5" is a name, not an error. Each also
+# API, whose `agent_setups` is an array). Each name follows the API's
+# display-name rule, so "Production Agent" is a name, not an error. Each also
 # becomes a directory in the report folder, so the slug it produces is checked
 # here rather than after a report has been built.
-env_list="${VERGING_ENVIRONMENTS:-}"
+setup_list="${VERGING_AGENT_SETUPS:-}"
 
 # validate_setup_name NAME: the display-name rule plus the folder-name rule.
 validate_setup_name() {
@@ -58,31 +66,23 @@ validate_setup_name() {
   fi
 }
 
-if [ -z "$env_list" ]; then
-  echo "::error::name the agent setup(s) to test in the environments input: one name, or several separated by commas and/or newlines. Name them as you named them at onboarding."
-  exit 1
-fi
 # Split the list on commas and newlines, trim each name, and drop empties, so
 # a trailing comma or a blank line is not itself a name. The delimiter is
 # never validated as a name; only the names between delimiters are.
-environments_json="$(printf '%s' "$env_list" \
-  | jq -Rsc 'split("\n") | map(split(",")) | add | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')"
-if [ "$environments_json" = "[]" ]; then
-  echo "::error::the environments input has no agent-setup names once the separators are removed; name at least one agent setup, e.g. \"Claude Code Opus 5\" or \"Claude Code Opus 5,Hermes GPT-5.6 Luna\""
-  exit 1
-fi
+agent_setups_json="$(jq -cn --arg raw "$setup_list" \
+  '$raw | split("\n") | map(split(",")) | flatten | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')"
 # The API refuses a repeated name; refuse it here too so it fails in seconds.
-if [ "$(printf '%s' "$environments_json" | jq 'length')" != "$(printf '%s' "$environments_json" | jq 'unique | length')" ]; then
-  echo "::error::the environments input names an agent setup more than once. Fix: name every agent setup once; each named setup is tested once per release."
+if [ "$(printf '%s' "$agent_setups_json" | jq 'length')" != "$(printf '%s' "$agent_setups_json" | jq 'unique | length')" ]; then
+  echo "::error::the agent_setups input names an agent setup more than once. Fix: name every agent setup once; each named setup is tested once per release."
   exit 1
 fi
 while IFS= read -r name; do
   validate_setup_name "$name" || exit 1
-done < <(printf '%s' "$environments_json" | jq -r '.[]')
+done < <(printf '%s' "$agent_setups_json" | jq -r '.[]')
 
 state_set api_base "${VERGING_API_BASE:-https://ci.verginglabs.com}"
 state_set folder "${VERGING_FOLDER:-Verging Memory CI}"
-state_set environments_json "$environments_json"
+state_set agent_setups_json "$agent_setups_json"
 state_set fetch_only "${VERGING_FETCH_ONLY_RELEASE_ID:-}"
 
 # wiring_check: "true" performs the free wiring check instead of a release.

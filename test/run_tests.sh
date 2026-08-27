@@ -119,13 +119,13 @@ setup_env() {
   : > "$GH_SHIM_LOG"
   export POLL_INTERVAL_SECONDS=0
   export VERGING_API_KEY="test-key"
-  export VERGING_ENVIRONMENTS="staging-mcp"
+  export VERGING_AGENT_SETUPS="staging-mcp"
   export VERGING_API_BASE="http://127.0.0.1:${MOCK_PORT:-0}"
   # The same value action.yml declares as the input default; the happy path
   # case checks the two stay in step.
   export VERGING_SUITES=""   # the action.yml default: omit -> all chosen suites
   unset VERGING_VENDOR_VERSION VERGING_ENDPOINT VERGING_FOLDER 2>/dev/null
-  unset VERGING_PRODUCT_NAME VERGING_FETCH_ONLY_RELEASE_ID VERGING_POLL_TIMEOUT_MINUTES VERGING_MODE 2>/dev/null
+  unset VERGING_PRODUCT_NAME VERGING_FETCH_ONLY_RELEASE_ID VERGING_POLL_TIMEOUT_MINUTES VERGING_MODE VERGING_LEGACY_ENVIRONMENTS 2>/dev/null
   unset VERGING_DEFAULT_BRANCH GH_PR_LIST_OUTPUT GH_COMMENTS_OUTPUT GH_SHIM_FAIL 2>/dev/null
 }
 
@@ -246,7 +246,7 @@ case_happy_path() {
   check_eq "submitted vendor_version comes from the VERSION file" "2.31.0" "$(printf '%s' "$posted" | jq -r '.vendor_version')"
   check_eq "no endpoint is submitted (the origin is pinned server-side at onboarding)" "null" "$(printf '%s' "$posted" | jq -r '.endpoint')"
   check_eq "no suites submitted by default (all chosen suites)" "null" "$(printf '%s' "$posted" | jq -r '.suites')"
-  check_eq "submitted environments (one-item array)" '["staging-mcp"]' "$(printf '%s' "$posted" | jq -c '.environments')"
+  check_eq "submitted agent_setups (one-item array)" '["staging-mcp"]' "$(printf '%s' "$posted" | jq -c '.agent_setups')"
   check_eq "no product_name submitted when the input is empty" "null" "$(printf '%s' "$posted" | jq -r '.product_name')"
   check_eq "no wiring_check field on a normal release" "null" "$(printf '%s' "$posted" | jq -r '.wiring_check')"
   check_no_grep "a normal release never says wiring check" "wiring check" "$CASE_TMP/run.log"
@@ -337,11 +337,11 @@ case_name_rules() {
 
   # ---- and through the step a customer's run actually executes.
   export VERGING_PRODUCT_NAME="Larkspur Memory"
-  export VERGING_ENVIRONMENTS="Production MCP"
+  export VERGING_AGENT_SETUPS="Production MCP"
   run_step resolve_inputs.sh
   check_exit "a two-word product name and agent setup are accepted" 0 "$STEP_EXIT"
   check_eq "the environment is stored as the customer named it" '["Production MCP"]' \
-    "$(cat "$RUNNER_TEMP/verging-memory-ci-state/environments_json")"
+    "$(cat "$RUNNER_TEMP/verging-memory-ci-state/agent_setups_json")"
   check_eq "the product name is stored as the customer named it" "Larkspur Memory" \
     "$(cat "$RUNNER_TEMP/verging-memory-ci-state/product_name")"
 
@@ -352,12 +352,12 @@ case_name_rules() {
   check_grep "the fix wording is the API's own" "letters, digits, spaces, dots, underscores, plus signs, and hyphens only; single spaces between words, none at the start or the end" "$CASE_TMP/run.log"
 
   export VERGING_PRODUCT_NAME="Larkspur.Memory-2+beta_1"
-  export VERGING_ENVIRONMENTS=".."
+  export VERGING_AGENT_SETUPS=".."
   run_step resolve_inputs.sh
   check_exit "an agent setup whose folder would be the parent directory is refused" 1 "$STEP_EXIT"
   check_grep "the refusal says what it is about" "cannot name the folder its evidence files go in" "$CASE_TMP/run.log"
 
-  export VERGING_ENVIRONMENTS="staging-mcp"
+  export VERGING_AGENT_SETUPS="staging-mcp"
   export VERGING_VENDOR_VERSION="not a version"
   run_step resolve_inputs.sh
   check_exit "vendor_version still refuses spaces" 1 "$STEP_EXIT"
@@ -531,6 +531,7 @@ case_wiring_check_input() {
   setup_env
   make_repos
   export VERGING_WIRING_CHECK="true"
+  unset VERGING_AGENT_SETUPS
 
   run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
   run_step reconcile.sh;       check_exit "reconcile exits 0" 0 "$STEP_EXIT"
@@ -542,7 +543,7 @@ case_wiring_check_input() {
   check_eq "exactly one request was submitted" "1" "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
   local posted; posted="$(posted_body)"
   check_eq "it is a wiring check" "true" "$(printf '%s' "$posted" | jq -r '.wiring_check')"
-  check_eq "with the same environments a release would name" '["staging-mcp"]' "$(printf '%s' "$posted" | jq -c '.environments')"
+  check_eq "onboarding wiring check leaves setup scope to account defaults" "false" "$(printf '%s' "$posted" | jq 'has("agent_setups")')"
   check_eq "and the same vendor_version" "2.31.0" "$(printf '%s' "$posted" | jq -r '.vendor_version')"
   check_grep "the log says what this run does" "wiring_check is true: this run performs the free wiring check instead of a release" "$CASE_TMP/run.log"
   check_grep "the closing notice names the input" "::notice::wiring_check is true, so this run performed the free wiring check instead of a release and committed its page." "$CASE_TMP/run.log"
@@ -730,7 +731,7 @@ case_sync_mode() {
   start_mock "$scenario" || { end_case; return; }
   setup_env
   # Sync needs no environment: unset the one setup_env exports and select sync.
-  unset VERGING_ENVIRONMENTS
+  unset VERGING_AGENT_SETUPS
   export VERGING_MODE="sync"
   make_repos
   seed_preliminary_release "$rid"
@@ -981,46 +982,46 @@ posted_body() { # echoes the body of the first POST to /v1/releases
 }
 
 case_single_setup_payload() {
-  begin_case "a single environment sends a one-item environments array, never a singular environment"
+  begin_case "a single agent setup sends a one-item agent_setups array, never a singular environment"
   local rid="run_20260815_186efbad9769"
   start_mock "$(happy_scenario "$rid")" || { end_case; return; }
   setup_env
   make_repos
-  # setup_env sets VERGING_ENVIRONMENTS=staging-mcp (one name = a one-item list).
+  # setup_env sets VERGING_AGENT_SETUPS=staging-mcp (one name = a one-item list).
   run_step resolve_inputs.sh; check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
   run_step reconcile.sh
   run_step run_release.sh;    check_exit "run_release exits 0" 0 "$STEP_EXIT"
 
   local posted; posted="$(posted_body)"
-  check_eq "a one-item environments array is sent" '["staging-mcp"]' "$(printf '%s' "$posted" | jq -c '.environments')"
+  check_eq "a one-item agent_setups array is sent" '["staging-mcp"]' "$(printf '%s' "$posted" | jq -c '.agent_setups')"
   check_eq "no singular environment field is sent" "null" "$(printf '%s' "$posted" | jq -r '.environment')"
   check_eq "no suites by default (all chosen suites)" "null" "$(printf '%s' "$posted" | jq -r '.suites')"
   end_case
 }
 
 case_multi_setup_payload() {
-  begin_case "environments A,B sends an environments array and no singular environment"
+  begin_case "agent_setups A,B sends an agent_setups array and no singular environment"
   local rid="run_20260815_186efbad9769"
   start_mock "$(happy_scenario "$rid")" || { end_case; return; }
   setup_env
   make_repos
   unset VERGING_ENVIRONMENT
-  export VERGING_ENVIRONMENTS="staging-mcp, prod-mcp"
+  export VERGING_AGENT_SETUPS="staging-mcp, prod-mcp"
   run_step resolve_inputs.sh; check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
   run_step reconcile.sh
   run_step run_release.sh;    check_exit "run_release exits 0" 0 "$STEP_EXIT"
 
   local posted; posted="$(posted_body)"
-  check_eq "the environments array matches the API's expected shape" '["staging-mcp","prod-mcp"]' "$(printf '%s' "$posted" | jq -c '.environments')"
+  check_eq "the agent_setups array matches the API's expected shape" '["staging-mcp","prod-mcp"]' "$(printf '%s' "$posted" | jq -c '.agent_setups')"
   check_eq "no singular environment is sent" "null" "$(printf '%s' "$posted" | jq -r '.environment')"
-  check_eq "the separator was trimmed, not sent as a name" "2" "$(printf '%s' "$posted" | jq -r '.environments | length')"
+  check_eq "the separator was trimmed, not sent as a name" "2" "$(printf '%s' "$posted" | jq -r '.agent_setups | length')"
   check_eq "no suites by default for multi-setup (all chosen suites)" "null" "$(printf '%s' "$posted" | jq -r '.suites')"
-  check_grep "the job summary lists the setups" "| environments | \`staging-mcp, prod-mcp\` |" "$GITHUB_STEP_SUMMARY"
+  check_grep "the job summary lists the setups" "| agent setups | \`staging-mcp, prod-mcp\` |" "$GITHUB_STEP_SUMMARY"
   end_case
 }
 
 case_multi_setup_newline_and_suite_scope() {
-  begin_case "environments split on newlines too, and a scoped suite still passes through"
+  begin_case "agent_setups split on newlines too, and a scoped suite still passes through"
   local rid="run_20260815_186efbad9769"
   start_mock "$(happy_scenario "$rid")" || { end_case; return; }
   setup_env
@@ -1028,61 +1029,73 @@ case_multi_setup_newline_and_suite_scope() {
   unset VERGING_ENVIRONMENT
   # Newline separated, with a blank line and a trailing comma that must not
   # become names of their own.
-  export VERGING_ENVIRONMENTS=$'staging-mcp\nprod-mcp,\n'
+  export VERGING_AGENT_SETUPS=$'staging-mcp\nprod-mcp,\n'
   export VERGING_SUITES="onboarding"
   run_step resolve_inputs.sh; check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
   run_step reconcile.sh
   run_step run_release.sh;    check_exit "run_release exits 0" 0 "$STEP_EXIT"
 
   local posted; posted="$(posted_body)"
-  check_eq "newline and comma separators both split the list" '["staging-mcp","prod-mcp"]' "$(printf '%s' "$posted" | jq -c '.environments')"
+  check_eq "newline and comma separators both split the list" '["staging-mcp","prod-mcp"]' "$(printf '%s' "$posted" | jq -c '.agent_setups')"
   check_eq "the release is scoped to the one suite" '["onboarding"]' "$(printf '%s' "$posted" | jq -c '.suites')"
   end_case
 }
 
 case_multi_setup_display_names() {
-  begin_case "environments accepts display names with internal spaces, and refuses a bad name without refusing the separator"
+  begin_case "agent_setups accepts display names with internal spaces, and refuses a bad name without refusing the separator"
   local rid="run_20260815_186efbad9769"
   start_mock "$(happy_scenario "$rid")" || { end_case; return; }
   setup_env
   make_repos
   unset VERGING_ENVIRONMENT
-  export VERGING_ENVIRONMENTS="Production MCP,Agent SDK"
+  export VERGING_AGENT_SETUPS="Production MCP,Agent SDK"
   run_step resolve_inputs.sh; check_exit "two display names are accepted" 0 "$STEP_EXIT"
   run_step reconcile.sh
   run_step run_release.sh
   local posted; posted="$(posted_body)"
-  check_eq "display names travel verbatim in the array" '["Production MCP","Agent SDK"]' "$(printf '%s' "$posted" | jq -c '.environments')"
+  check_eq "display names travel verbatim in the array" '["Production MCP","Agent SDK"]' "$(printf '%s' "$posted" | jq -c '.agent_setups')"
 
   # A bad name in the list is refused; the comma itself is never the problem.
-  export VERGING_ENVIRONMENTS="staging-mcp,bad name!"
+  export VERGING_AGENT_SETUPS="staging-mcp,bad name!"
   run_step resolve_inputs.sh; check_exit "a bad name in the list is refused" 1 "$STEP_EXIT"
   check_grep "the refusal names the bad setup, not the separator" "agent setup 'bad name!' is not valid" "$CASE_TMP/run.log"
 
   # A repeated name is refused, matching the API.
-  export VERGING_ENVIRONMENTS="staging-mcp,staging-mcp"
+  export VERGING_AGENT_SETUPS="staging-mcp,staging-mcp"
   run_step resolve_inputs.sh; check_exit "a repeated name is refused" 1 "$STEP_EXIT"
   check_grep "the refusal explains the repeat" "names an agent setup more than once" "$CASE_TMP/run.log"
   end_case
 }
 
 case_environment_missing_refused() {
-  begin_case "environments unset or empty is refused: no agent setup, no release"
+  begin_case "agent_setups is optional, while the retired environments input fails clearly"
   MOCK_PORT="0"
   setup_env
   make_repos
 
-  # Not set at all is refused.
-  unset VERGING_ENVIRONMENTS
+  # Not set means account defaults. The onboarding wiring-check step relies on
+  # this before the final integration step adds trigger-specific setup scope.
+  unset VERGING_AGENT_SETUPS
   run_step resolve_inputs.sh
-  check_exit "resolve_inputs exits 1 when environments is unset" 1 "$STEP_EXIT"
-  check_grep "the refusal names the environments input" "name the agent setup(s) to test in the environments input" "$CASE_TMP/run.log"
+  check_exit "resolve_inputs accepts omitted agent_setups" 0 "$STEP_EXIT"
+  check_eq "omitted agent_setups resolves to an empty selection" "[]" "$(cat "$RUNNER_TEMP/verging-memory-ci-state/agent_setups_json")"
 
-  # Set to only separators (no names once trimmed) is refused too.
-  export VERGING_ENVIRONMENTS=" , "
+  # Only separators is the same omission after normalization.
+  export VERGING_AGENT_SETUPS=" , "
   run_step resolve_inputs.sh
-  check_exit "resolve_inputs exits 1 when environments has no names" 1 "$STEP_EXIT"
-  check_grep "the refusal explains the empty list" "no agent-setup names once the separators are removed" "$CASE_TMP/run.log"
+  check_exit "resolve_inputs accepts an empty normalized agent_setups list" 0 "$STEP_EXIT"
+  check_eq "separator-only agent_setups resolves to an empty selection" "[]" "$(cat "$RUNNER_TEMP/verging-memory-ci-state/agent_setups_json")"
+
+  # The retired name is never an alias. It is accepted by action.yml only so
+  # the migration failure is explicit rather than a GitHub metadata warning.
+  export VERGING_LEGACY_ENVIRONMENTS="staging-mcp"
+  run_step resolve_inputs.sh
+  check_exit "resolve_inputs rejects the retired environments input" 1 "$STEP_EXIT"
+  check_grep "the refusal gives the exact breaking migration" "replace environments with agent_setups; no compatibility alias is provided" "$CASE_TMP/run.log"
+
+  export VERGING_MODE="sync"
+  run_step resolve_inputs.sh
+  check_exit "sync mode also rejects the retired environments input" 1 "$STEP_EXIT"
   end_case
 }
 
@@ -1178,7 +1191,7 @@ case_timeout_pending() {
   new_job
   set_scenario "$(happy_scenario "$rid" | jq --arg rid "$rid" '.statuses = [{release_id: $rid, status: "report_ready", updated_at: "2026-08-15T10:31:00Z", corrections_due_by: "2026-08-18"}]')"
   export GITHUB_EVENT_NAME="push"
-  unset GITHUB_EVENT_PATH VERGING_ENVIRONMENTS VERGING_POLL_TIMEOUT_MINUTES
+  unset GITHUB_EVENT_PATH VERGING_AGENT_SETUPS VERGING_POLL_TIMEOUT_MINUTES
   export VERGING_MODE="sync"
   run_step resolve_inputs.sh;  check_exit "sync: resolve_inputs exits 0" 0 "$STEP_EXIT"
   run_step reconcile.sh;       check_exit "sync: reconcile exits 0" 0 "$STEP_EXIT"
@@ -1213,7 +1226,7 @@ case_pending_running_then_failed() {
   setup_env
   make_repos
   seed_pending_release "$rid" "2.31.0" "2026-08-15T08:25:59.868Z"
-  unset VERGING_ENVIRONMENTS
+  unset VERGING_AGENT_SETUPS
   export VERGING_MODE="sync"
   local pending="$WORKSPACE/$FOLDER/releases/pending.json"
 
@@ -1336,7 +1349,7 @@ case_pending_older_than_latest() {
   make_repos
   seed_preliminary_release "$newer"
   seed_pending_release "$old" "2.29.0" "2026-08-10T09:00:00.000Z"
-  unset VERGING_ENVIRONMENTS
+  unset VERGING_AGENT_SETUPS
   export VERGING_MODE="sync"
   run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
   run_step reconcile.sh;       check_exit "reconcile exits 0" 0 "$STEP_EXIT"

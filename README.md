@@ -39,7 +39,7 @@ jobs:
       - uses: verginglabs/memory-ci-action@v1
         with:
           api_key: ${{ secrets.VERGING_API_KEY }}
-          environments: "Claude Code Opus 5,Hermes GPT-5.6 Luna"
+          agent_setups: "Claude Code Opus 5,Hermes GPT-5.6 Luna"
           product_name: "Acme Recall"
           suites: core-recall,preference-adherence,truth-maintenance
           fetch_only_release_id: ${{ inputs.fetch_only_release_id }}

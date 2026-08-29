@@ -307,9 +307,14 @@ index_newest_date() {
 # folder yet:
 #
 #   {"<release_id>": {"vendor_version": "2.31.0",
-#                     "environments": ["Claude Code Opus 5"],
+#                     "agent_setups": ["Claude Code Opus 5"],
 #                     "submitted_at": "2026-08-26T09:12:04.118Z",
 #                     "status": "running"}}
+#
+# An entry written by an earlier version of this action names the setups
+# under "environments"; pending_get reads it as agent_setups, and the entry
+# is rewritten under the current name the next time its status is brought
+# up to date.
 #
 # The entry is written right after the 202 receipt, its status is brought up
 # to date when the job stops waiting, and it is committed with the folder.
@@ -334,12 +339,17 @@ pending_set() {
   jq --arg id "$id" --argjson entry "$entry" '.[$id] = $entry' "$f" > "$tmp" && mv "$tmp" "$f"
 }
 
-# pending_get FOLDER RELEASE_ID: the entry as one JSON line, or empty.
+# pending_get FOLDER RELEASE_ID: the entry as one JSON line, or empty. An
+# entry from an earlier version, keyed "environments", is read as
+# agent_setups.
 pending_get() {
   local f
   f="$(pending_path "$1")"
   [ -f "$f" ] || return 0
-  jq -c --arg id "$2" '.[$id] // empty' "$f" 2>/dev/null || true
+  jq -c --arg id "$2" '.[$id] // empty
+    | if type == "object" and has("environments") and (has("agent_setups") | not)
+      then {vendor_version, agent_setups: .environments} + (del(.environments) | del(.vendor_version))
+      else . end' "$f" 2>/dev/null || true
 }
 
 # pending_set_status FOLDER RELEASE_ID STATUS: bring an entry's last status

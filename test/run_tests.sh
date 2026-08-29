@@ -1226,6 +1226,8 @@ set_scenario() {
 }
 
 seed_pending_release() { # $1 release id, $2 vendor_version, $3 submitted_at: a pending record an earlier job committed
+  # Deliberately the shape an earlier version of the action wrote (the setups
+  # under "environments"): every reader must still take it.
   mkdir -p "$WORKSPACE/$FOLDER/releases"
   jq -n --arg rid "$1" --arg v "$2" --arg at "$3" \
     '{($rid): {vendor_version: $v, environments: ["staging-mcp"], submitted_at: $at, status: "running"}}' \
@@ -1262,8 +1264,8 @@ case_timeout_pending() {
   check_eq "the status was asked for once, then the job stopped waiting" "1" "$(cat "$MOCK_DIR/status-$rid.count")"
   local pending="$WORKSPACE/$FOLDER/releases/pending.json"
   check_file "the pending record is written" "$pending"
-  check_eq "the pending entry: vendor_version, environments, submitted_at, last status" \
-    '{"vendor_version":"2.31.0","environments":["staging-mcp"],"submitted_at":"2026-08-15T08:25:59.868Z","status":"running"}' \
+  check_eq "the pending entry: vendor_version, agent_setups, submitted_at, last status" \
+    '{"vendor_version":"2.31.0","agent_setups":["staging-mcp"],"submitted_at":"2026-08-15T08:25:59.868Z","status":"running"}' \
     "$(jq -c --arg rid "$rid" '.[$rid]' "$pending")"
   check_no_path "no release directory: there is no report yet" "$WORKSPACE/$FOLDER/releases/2026-08-15-2.31.0"
   check_no_path "no latest/: there is no report yet" "$WORKSPACE/$FOLDER/latest"
@@ -1380,13 +1382,39 @@ case_fetch_only_pending() {
   check_grep "the exact notice is emitted" "$(pending_notice "$rid" running)" "$CASE_TMP/run.log"
   check_no_grep "no error anywhere in the job" "::error::" "$CASE_TMP/run.log"
   check_eq "the pending entry comes from the status body" \
-    '{"vendor_version":"2.30.9","environments":["Production MCP"],"submitted_at":"2026-08-10T09:00:00.000Z","status":"running"}' \
+    '{"vendor_version":"2.30.9","agent_setups":["Production MCP"],"submitted_at":"2026-08-10T09:00:00.000Z","status":"running"}' \
     "$(jq -c --arg rid "$rid" '.[$rid]' "$WORKSPACE/$FOLDER/releases/pending.json")"
   check_grep "output verdict is Pending" "verdict=Pending" "$GITHUB_OUTPUT"
   check_eq "the pending record is committed with the status body's version" \
     "Verging Memory CI: release 2.30.9 ($rid) is pending; the report follows" \
     "$(git -C "$ORIGIN" log -1 --format=%s main)"
   check_grep "check run conclusion is neutral" "conclusion=neutral" "$GH_SHIM_LOG"
+
+  # A pending record an earlier version of the action wrote, keyed
+  # "environments": it is read as agent_setups, and once its status is
+  # brought up to date it is rewritten under the current name.
+  new_job
+  local old="run_20260809_0011223344cc"
+  set_scenario "$(jq -n --arg old "$old" '{status_by_id: {($old): [
+    {release_id: $old, status: "running", vendor_version: "2.30.8", received_at: "2026-08-09T09:00:00.000Z",
+     environments: {count: 1, agent_setups: ["staging-mcp"], suites: ["Core Recall"]}}
+  ]}}')"
+  seed_pending_release "$old" "2.30.8" "2026-08-09T09:00:00.000Z"
+  check_grep "the seeded record uses the old key" '"environments"' "$WORKSPACE/$FOLDER/releases/pending.json"
+  check_eq "pending_get reads the old key as agent_setups" \
+    '{"vendor_version":"2.30.8","agent_setups":["staging-mcp"],"submitted_at":"2026-08-09T09:00:00.000Z","status":"running"}' \
+    "$(cd "$WORKSPACE" && set +u && source "$ROOT/scripts/lib.sh" && pending_get "$FOLDER" "$old")"
+  export VERGING_FETCH_ONLY_RELEASE_ID="$old"
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh;       check_exit "reconcile reads the old record and exits 0" 0 "$STEP_EXIT"
+  check_grep "the reconcile pass read the old record" "Release $old (2.30.8) is on record as pending since 2026-08-09T09:00:00.000Z (last status: running)" "$CASE_TMP/run.log"
+  run_step run_release.sh;     check_exit "run_release exits 0 when the deadline passes" 0 "$STEP_EXIT"
+  check_eq "the old record is rewritten under agent_setups" \
+    '{"vendor_version":"2.30.8","agent_setups":["staging-mcp"],"submitted_at":"2026-08-09T09:00:00.000Z","status":"running"}' \
+    "$(jq -c --arg id "$old" '.[$id]' "$WORKSPACE/$FOLDER/releases/pending.json")"
+  check_eq "exactly one entry, under its release id" "1" "$(jq 'length' "$WORKSPACE/$FOLDER/releases/pending.json")"
+  check_no_grep "the old key is gone from the file" '"environments"' "$WORKSPACE/$FOLDER/releases/pending.json"
+  unset VERGING_FETCH_ONLY_RELEASE_ID
   end_case
 }
 

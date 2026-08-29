@@ -126,7 +126,7 @@ setup_env() {
   export VERGING_SUITES=""   # the action.yml default: omit -> all chosen suites
   unset VERGING_VENDOR_VERSION VERGING_ENDPOINT VERGING_FOLDER 2>/dev/null
   unset VERGING_PRODUCT_NAME VERGING_FETCH_ONLY_RELEASE_ID VERGING_POLL_TIMEOUT_MINUTES VERGING_MODE VERGING_LEGACY_ENVIRONMENTS 2>/dev/null
-  unset VERGING_DEFAULT_BRANCH GH_PR_LIST_OUTPUT GH_COMMENTS_OUTPUT GH_SHIM_FAIL 2>/dev/null
+  unset VERGING_DEFAULT_BRANCH VERGING_FALLBACK_PULL_REQUEST GH_PR_LIST_OUTPUT GH_COMMENTS_OUTPUT GH_SHIM_FAIL 2>/dev/null
 }
 
 make_repos() {
@@ -790,18 +790,9 @@ case_push_retry() {
   end_case
 }
 
-case_push_fallback() {
-  begin_case "a rejecting remote falls back to the reports branch and a pull request"
-  local rid="run_20260815_186efbad9769"
-  start_mock "$(happy_scenario "$rid")" || { end_case; return; }
-  setup_env
-  make_repos
-  run_step resolve_inputs.sh
-  run_step reconcile.sh
-  run_step run_release.sh
-  check_exit "run_release exits 0" 0 "$STEP_EXIT"
-
-  # The remote now rejects every push to main (a protected branch would).
+# reject_pushes_to_main: the origin refuses every push to main from now on,
+# as a ruleset or branch protection that does not let the workflow push would.
+reject_pushes_to_main() {
   cat > "$ORIGIN/hooks/pre-receive" <<'HOOK'
 #!/usr/bin/env bash
 while read -r old new ref; do
@@ -813,16 +804,117 @@ done
 exit 0
 HOOK
   chmod +x "$ORIGIN/hooks/pre-receive"
+}
+
+PUSH_REFUSED_ERROR="::error title=Verging Memory CI push refused::The report commit could not be pushed to main after 3 attempts, so it is not in your repository. Nothing else was written: no other branch, no pull request. Fix: allow the workflow's token to push to main."
+
+check_push_refused_cleanly() { # the refusal touched nothing else: no reports branch, no pull request, no default branch
+  check_grep "the named error says what was refused and what to allow" "$PUSH_REFUSED_ERROR" "$CASE_TMP/run.log"
+  check_grep "the error names the permission" "permissions: contents: write" "$CASE_TMP/run.log"
+  check_grep "the job summary carries the refusal" "## Verging Memory CI: push to \`main\` refused" "$GITHUB_STEP_SUMMARY"
+  check_eq "no reports branch was written" "" "$(git -C "$ORIGIN" rev-parse -q --verify refs/heads/verging-memory-ci/reports 2>/dev/null || true)"
+  check_eq "gh was never asked about a pull request" "0" "$(grep -c '^gh pr' "$GH_SHIM_LOG")"
+  check_no_grep "the default branch is never named" "dev" "$GH_SHIM_LOG"
+  check_no_grep "the reports branch is never named" "verging-memory-ci/reports" "$CASE_TMP/run.log"
+  check_no_grep "no warning stands in for the error" "::warning::could not push" "$CASE_TMP/run.log"
+  check_eq "the push path is recorded as refused" "refused" "$(cat "$RUNNER_TEMP/verging-memory-ci-state/push_path")"
+}
+
+case_push_refused() {
+  begin_case "a refused push fails the job with a named error, writes no other branch and opens no pull request"
+  local rid="run_20260815_186efbad9769"
+  start_mock "$(happy_scenario "$rid")" || { end_case; return; }
+  setup_env
+  make_repos
+  # The repository's default branch is not the branch the job ran on; it
+  # must never be touched or named.
+  export VERGING_DEFAULT_BRANCH="dev"
+  run_step resolve_inputs.sh
+  run_step reconcile.sh
+  run_step run_release.sh
+  check_exit "run_release exits 0" 0 "$STEP_EXIT"
+  reject_pushes_to_main
+
+  run_step commit_push.sh
+  check_exit "commit_push exits 1: the job fails" 1 "$STEP_EXIT"
+  check_grep "the push was retried before failing" "Push attempt 3 to main failed" "$CASE_TMP/run.log"
+  check_push_refused_cleanly
+  check_grep "the recovery names the release to fetch" "re-run with fetch_only_release_id=$rid to fetch and commit this report without submitting anything" "$CASE_TMP/run.log"
+  check_eq "origin main is untouched" "initial commit" "$(git -C "$ORIGIN" log -1 --format=%s main)"
+  check_grep "action.yml declares the opt-in, off by default" 'fallback_pull_request:' "$ROOT/action.yml"
+  check_eq "the opt-in defaults to false in action.yml" "1" "$(grep -A 3 '^  fallback_pull_request:' "$ROOT/action.yml" | grep -c 'default: "false"')"
+
+  # A wiring check with the opt-in on: the opt-in is ignored, the job fails
+  # the same way, and the page never goes anywhere but the branch it ran on.
+  new_job
+  set_scenario "$(wiring_scenario "run_20260825_0a1b2c3d4e5f" | jq '.receipt_code = 400 | .receipt = {error: "the test expected a wiring check, not a release", fix: "-"}')"
+  export VERGING_WIRING_CHECK="true"
+  export VERGING_FALLBACK_PULL_REQUEST="true"
+  unset VERGING_AGENT_SETUPS
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  check_grep "the log says the opt-in is ignored during a wiring check" "fallback_pull_request is ignored during a wiring check: the page must land on the branch the job ran on" "$CASE_TMP/run.log"
+  run_step reconcile.sh;       check_exit "reconcile exits 0" 0 "$STEP_EXIT"
+  run_step run_release.sh;     check_exit "run_release exits 0: the wiring check itself passed" 0 "$STEP_EXIT"
+  run_step commit_push.sh;     check_exit "commit_push exits 1: the wiring page did not land" 1 "$STEP_EXIT"
+  check_grep "the opt-in is refused at push time too" "fallback_pull_request is on, but this job is a wiring check" "$CASE_TMP/run.log"
+  check_push_refused_cleanly
+  check_grep "the recovery is to re-run the free wiring check" "re-run this workflow: the wiring check is free and is performed again" "$CASE_TMP/run.log"
+  check_eq "origin main is still untouched" "initial commit" "$(git -C "$ORIGIN" log -1 --format=%s main)"
+  unset VERGING_WIRING_CHECK VERGING_FALLBACK_PULL_REQUEST VERGING_DEFAULT_BRANCH
+  end_case
+}
+
+case_reconcile_push_refused() {
+  begin_case "the reconcile pass fails the job the same way when its push is refused, and leaves the pending record for the next job"
+  local rid="run_20260826_5e6f7a8b9c0d"
+  start_mock "$(happy_scenario "$rid" | jq --arg rid "$rid" '.statuses = [{release_id: $rid, status: "report_ready", updated_at: "2026-08-15T10:31:00Z", corrections_due_by: "2026-08-18"}]')" || { end_case; return; }
+  setup_env
+  make_repos
+  seed_pending_release "$rid" "2.31.0" "2026-08-15T08:25:59.868Z"
+  reject_pushes_to_main
+  export VERGING_DEFAULT_BRANCH="dev"
+  unset VERGING_AGENT_SETUPS
+  export VERGING_MODE="sync"
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  check_eq "the opt-in is stored in sync mode too, as false" "false" "$(cat "$RUNNER_TEMP/verging-memory-ci-state/fallback_pull_request")"
+  run_step reconcile.sh;       check_exit "reconcile exits 1: the job fails" 1 "$STEP_EXIT"
+  check_grep "the report was collected and committed locally first" "Committed the report for 2.31.0 ($rid): Ready" "$CASE_TMP/run.log"
+  check_push_refused_cleanly
+  check_grep "the recovery is to re-run" "re-run this workflow: the reports it collected are fetched and committed again" "$CASE_TMP/run.log"
+  check_eq "origin main still carries the pending record, so the next job collects again" \
+    "Verging Memory CI: release 2.31.0 ($rid) is pending; the report follows" \
+    "$(git -C "$ORIGIN" log -1 --format=%s main)"
+  run_step commit_push.sh;     check_exit "the commit step has nothing of its own to commit" 0 "$STEP_EXIT"
+  unset VERGING_MODE VERGING_DEFAULT_BRANCH
+  end_case
+}
+
+case_fallback_pull_request_opt_in() {
+  begin_case "fallback_pull_request: true restores the reports branch and the pull request for a refused push"
+  local rid="run_20260815_186efbad9769"
+  start_mock "$(happy_scenario "$rid")" || { end_case; return; }
+  setup_env
+  make_repos
+  export VERGING_FALLBACK_PULL_REQUEST="true"
+  run_step resolve_inputs.sh
+  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  check_eq "the opt-in is stored" "true" "$(cat "$RUNNER_TEMP/verging-memory-ci-state/fallback_pull_request")"
+  run_step reconcile.sh
+  run_step run_release.sh
+  check_exit "run_release exits 0" 0 "$STEP_EXIT"
+  reject_pushes_to_main
 
   run_step commit_push.sh
   check_exit "commit_push exits 0 even though the push failed" 0 "$STEP_EXIT"
-  check_grep "the log says plainly the direct push failed" "could not push the report commit to main after 3 attempts" "$CASE_TMP/run.log"
+  check_grep "the log says plainly the direct push failed" "could not push the report commit to main after 3 attempts; fallback_pull_request is on" "$CASE_TMP/run.log"
   check_grep "the log says the pull request path happened" "a pull request into main was opened" "$CASE_TMP/run.log"
+  check_no_grep "no error: the job is green on this path" "::error" "$CASE_TMP/run.log"
   check_eq "the reports branch carries the report commit" \
     "Verging Memory CI: report for 2.31.0 ($rid): Ready" \
     "$(git -C "$ORIGIN" log -1 --format=%s verging-memory-ci/reports)"
   check_grep "gh looked for an existing pull request" "pr list --head verging-memory-ci/reports" "$GH_SHIM_LOG"
   check_grep "gh opened the pull request with the ruled title" "pr create --head verging-memory-ci/reports --base main --title Verging\\ Memory\\ CI\\ reports" "$GH_SHIM_LOG"
+  check_eq "the push path is recorded as the fallback" "fallback" "$(cat "$RUNNER_TEMP/verging-memory-ci-state/push_path")"
 
   # A later run finds the pull request already open and does not open another.
   printf '\n' >> "$WORKSPACE/$FOLDER/releases/index.md"
@@ -831,6 +923,14 @@ HOOK
   check_exit "the second commit_push exits 0" 0 "$STEP_EXIT"
   check_eq "no second pull request opened" "1" "$(grep -c 'pr create' "$GH_SHIM_LOG")"
   check_grep "the log names the open pull request" "the open pull request #7 into main now carries it" "$CASE_TMP/run.log"
+  unset GH_PR_LIST_OUTPUT
+
+  # The input's own rule.
+  export VERGING_FALLBACK_PULL_REQUEST="maybe"
+  run_step resolve_inputs.sh
+  check_exit "a value other than true/false is refused" 1 "$STEP_EXIT"
+  check_grep "the refusal names the input" "fallback_pull_request 'maybe' is not valid" "$CASE_TMP/run.log"
+  unset VERGING_FALLBACK_PULL_REQUEST
   end_case
 }
 
@@ -1393,7 +1493,9 @@ case_fetch_only_pending
 case_pending_after_fetch_failure
 case_pending_older_than_latest
 case_push_retry
-case_push_fallback
+case_push_refused
+case_reconcile_push_refused
+case_fallback_pull_request_opt_in
 case_surfaces
 case_vocabulary
 

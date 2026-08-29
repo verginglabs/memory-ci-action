@@ -843,6 +843,9 @@ case_push_refused() {
   check_eq "origin main is untouched" "initial commit" "$(git -C "$ORIGIN" log -1 --format=%s main)"
   check_grep "action.yml declares the opt-in, off by default" 'fallback_pull_request:' "$ROOT/action.yml"
   check_eq "the opt-in defaults to false in action.yml" "1" "$(grep -A 3 '^  fallback_pull_request:' "$ROOT/action.yml" | grep -c 'default: "false"')"
+  check_grep "the README (generated from the setup guide) documents the opt-in" 'fallback_pull_request: "true"' "$ROOT/README.md"
+  check_grep "the README says a refused push fails the job" "When the push is refused the job fails with an" "$ROOT/README.md"
+  check_no_grep "the README no longer promises a pull request on its own" "opens or updates a pull request" "$ROOT/README.md"
 
   # A wiring check with the opt-in on: the opt-in is ignored, the job fails
   # the same way, and the page never goes anywhere but the branch it ran on.

@@ -90,6 +90,15 @@ if [ "$event" = "pull_request" ] && [ -n "$pr_number" ] && [ -n "$repo" ]; then
   [ -n "$branch" ] || branch="${GITHUB_HEAD_REF:-main}"
   encoded_path="$(printf '%s' "$report_path" | sed 's/ /%20/g')"
   link="/$repo/blob/$branch/$encoded_path"
+  # blob_link PATH LABEL: an HTML anchor to the committed file that opens in a
+  # new tab (target="_blank": a plain markdown link would navigate the pull
+  # request tab away from the review). Spaces are the one report-folder path
+  # character a URL cannot carry raw.
+  server_url="${GITHUB_SERVER_URL:-https://github.com}"
+  blob_link() {
+    printf '<a href="%s/%s/blob/%s/%s" target="_blank">%s</a>' \
+      "$server_url" "$repo" "$branch" "$(printf '%s' "$1" | sed 's/ /%20/g')" "$2"
+  }
   if [ "$wiring" = "1" ]; then
     body="<!-- verging-memory-ci -->
 **Verging Memory CI: wiring check, not a release.** $(wiring_line "[read it]($link)")"
@@ -97,10 +106,35 @@ if [ "$event" = "pull_request" ] && [ -n "$pr_number" ] && [ -n "$repo" ]; then
     body="<!-- verging-memory-ci -->
 **Verging Memory CI: report pending.** $(pending_line)"
   else
-    body="<!-- verging-memory-ci -->
+    # The report summary comment: the committed REPORT.md's own "Results at a
+    # glance" section inline (the verdict's figures, readable without leaving
+    # the pull request), then the committed files, each opening in a new tab.
+    # One comment per pull request: a rerun updates the marker-bearing comment
+    # in place below instead of stacking a second one.
+    release_dir="${report_path%/REPORT.md}"
+    glance="$(awk '/^## Results at a glance$/{on=1; next} on && /^## /{exit} on{print}' "$report_path" 2>/dev/null)"
+    files="$(blob_link "$report_path" "Full report")"
+    [ -f "$release_dir/diff.json" ] && files="$files | $(blob_link "$release_dir/diff.json" "diff.json")"
+    index_path="$(dirname "$release_dir")/index.md"
+    [ -f "$index_path" ] && files="$files | $(blob_link "$index_path" "All releases")"
+    if [ -n "$glance" ]; then
+      body="<!-- verging-memory-ci -->
 **Verging Memory CI: $verdict**
 
-Release \`$release_id\`. [Read the report]($link)."
+Release \`$release_id\`.
+
+### Results at a glance
+$glance
+
+$files"
+    else
+      # The committed report (or its glance section) is not readable here; the
+      # comment still says what happened and where the report is.
+      body="<!-- verging-memory-ci -->
+**Verging Memory CI: $verdict**
+
+Release \`$release_id\`. $files"
+    fi
   fi
   existing="$(gh api "repos/$repo/issues/$pr_number/comments" --paginate \
     --jq '.[] | select(.body | startswith("<!-- verging-memory-ci -->")) | .id' 2>/dev/null \

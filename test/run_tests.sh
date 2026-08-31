@@ -257,7 +257,7 @@ case_happy_path() {
   check_no_path "no pending record once the report is in the folder" "$WORKSPACE/$FOLDER/releases/pending.json"
 
   check_eq "report commit is on the triggering branch" \
-    "Verging Memory CI: report for 2.31.0 ($rid): Ready" \
+    "Verging Memory CI: report for 2.31.0 ($rid): Ready [skip ci]" \
     "$(git -C "$ORIGIN" log -1 --format=%s main)"
   check_grep "the log says the push path plainly" "Report commit pushed to main." "$CASE_TMP/run.log"
   check_grep "receipt echoed" "Receipt (HTTP 202):" "$CASE_TMP/run.log"
@@ -452,7 +452,7 @@ case_fetch_only() {
   check_no_path "no evidence directory when every test passed" "$dir/evidence"
   check_dirs_equal "latest/ refreshed" "$dir" "$WORKSPACE/$FOLDER/latest"
   check_eq "committed exactly like a normal run" \
-    "Verging Memory CI: report for 2.30.9 ($rid): Ready" \
+    "Verging Memory CI: report for 2.30.9 ($rid): Ready [skip ci]" \
     "$(git -C "$ORIGIN" log -1 --format=%s main)"
   check_grep "output release_id" "release_id=$rid" "$GITHUB_OUTPUT"
   end_case
@@ -510,7 +510,7 @@ check_wiring_page_committed() { # $1 wiring id: the page landed like a report, t
   check_file "folder README written" "$WORKSPACE/$FOLDER/README.md"
   check_grep "index row says Wiring check in place of a verdict" "[$1](2026-08-25-2.31.0-wiring-check/REPORT.md) | Wiring check | wiring |" "$WORKSPACE/$FOLDER/releases/index.md"
   check_eq "the commit is named for what it is" \
-    "Verging Memory CI: wiring check for 2.31.0 ($1)" \
+    "Verging Memory CI: wiring check for 2.31.0 ($1) [skip ci]" \
     "$(git -C "$ORIGIN" log -1 --format=%s main)"
   check_grep "output verdict is Wiring check" "verdict=Wiring check" "$GITHUB_OUTPUT"
   check_grep "output release_id is the wiring check's id" "release_id=$1" "$GITHUB_OUTPUT"
@@ -707,7 +707,7 @@ case_reconcile() {
   check_grep "index row updated to final" "[$rid](2026-08-14-2.30.0/REPORT.md) | Ready | final |" "$WORKSPACE/$FOLDER/releases/index.md"
   check_no_grep "index row no longer says preliminary" "preliminary" "$WORKSPACE/$FOLDER/releases/index.md"
   check_eq "the reconcile commit message" \
-    "Verging Memory CI: final report for 2.30.0 ($rid)" \
+    "Verging Memory CI: final report for 2.30.0 ($rid) [skip ci]" \
     "$(git -C "$ORIGIN" log -1 --format=%s main)"
   end_case
 }
@@ -913,7 +913,7 @@ case_fallback_pull_request_opt_in() {
   check_grep "the log says the pull request path happened" "a pull request into main was opened" "$CASE_TMP/run.log"
   check_no_grep "no error: the job is green on this path" "::error" "$CASE_TMP/run.log"
   check_eq "the reports branch carries the report commit" \
-    "Verging Memory CI: report for 2.31.0 ($rid): Ready" \
+    "Verging Memory CI: report for 2.31.0 ($rid): Ready [skip ci]" \
     "$(git -C "$ORIGIN" log -1 --format=%s verging-memory-ci/reports)"
   check_grep "gh looked for an existing pull request" "pr list --head verging-memory-ci/reports" "$GH_SHIM_LOG"
   check_grep "gh opened the pull request with the ruled title" "pr create --head verging-memory-ci/reports --base main --title Verging\\ Memory\\ CI\\ reports" "$GH_SHIM_LOG"
@@ -947,7 +947,7 @@ seed_surfaces_state() { # $1 verdict
 }
 
 case_surfaces() {
-  begin_case "check run and comment: neutral is never a failure, one comment per pull request"
+  begin_case "check run and comment: neutral is never a failure, one comment per pull request, the comment carries the report's Results at a glance"
   MOCK_PORT="0"
   setup_env
   make_repos
@@ -956,6 +956,8 @@ case_surfaces() {
   export GITHUB_EVENT_PATH="$CASE_TMP/event.json"
   jq -n '{pull_request: {number: 12, head: {sha: "abc123def4567890abc123def4567890abc123de"}}}' > "$GITHUB_EVENT_PATH"
 
+  # First pass: the committed report is NOT on disk. The comment still says
+  # what happened and links the report; it just cannot inline the glance.
   seed_surfaces_state "Not ready: 1 accuracy failure"
   run_step surfaces.sh
   check_exit "surfaces exits 0" 0 "$STEP_EXIT"
@@ -965,13 +967,33 @@ case_surfaces() {
   check_grep "comment body starts with the marker" "<!-- verging-memory-ci -->" "$GH_SHIM_LOG"
   check_grep "comment body carries the release id" "run_20260815_186efbad9769" "$GH_SHIM_LOG"
   check_grep "comment links the committed report" "/acme/widget/blob/feature-x/Verging%20Memory%20CI/releases/2026-08-15-2.31.0/REPORT.md" "$GH_SHIM_LOG"
+  check_grep "the report link is an anchor that opens in a new tab" \
+    '<a href="https://github.com/acme/widget/blob/feature-x/Verging%20Memory%20CI/releases/2026-08-15-2.31.0/REPORT.md" target="_blank">Full report</a>' \
+    "$GH_SHIM_LOG"
+  check_no_grep "no glance section when the report file is absent" "### Results at a glance" "$GH_SHIM_LOG"
 
-  # A later run updates the same comment in place.
+  # A later run updates the same comment in place, now with the committed
+  # report on disk: the comment inlines the report's own Results at a glance
+  # and links every committed report file, each opening in a new tab.
+  local dir="$WORKSPACE/$FOLDER/releases/2026-08-15-2.31.0"
+  mkdir -p "$dir"
+  make_report_md "Larkspur 2.31.0" "Not ready: 1 accuracy failure" "Preliminary report (the final report follows)" > "$dir/REPORT.md"
+  printf '{"stage":"preliminary"}\n' > "$dir/diff.json"
+  printf '# Releases\n' > "$WORKSPACE/$FOLDER/releases/index.md"
   export GH_COMMENTS_OUTPUT="98765"
   run_step surfaces.sh
   check_exit "surfaces exits 0 on the update pass" 0 "$STEP_EXIT"
   check_grep "the existing comment is updated in place" "issues/comments/98765 -X PATCH" "$GH_SHIM_LOG"
   check_eq "only one comment was ever created" "1" "$(grep -c 'issues/12/comments -X POST' "$GH_SHIM_LOG")"
+  check_grep "the comment inlines the glance heading" "### Results at a glance" "$GH_SHIM_LOG"
+  check_grep "the comment inlines the glance content" '**Accuracy:** as measured.' "$GH_SHIM_LOG"
+  check_grep "diff.json is linked and opens in a new tab" \
+    '<a href="https://github.com/acme/widget/blob/feature-x/Verging%20Memory%20CI/releases/2026-08-15-2.31.0/diff.json" target="_blank">diff.json</a>' \
+    "$GH_SHIM_LOG"
+  check_grep "the releases index is linked and opens in a new tab" \
+    '<a href="https://github.com/acme/widget/blob/feature-x/Verging%20Memory%20CI/releases/index.md" target="_blank">All releases</a>' \
+    "$GH_SHIM_LOG"
+  check_no_grep "the old markdown-only report line is gone" "[Read the report]" "$GH_SHIM_LOG"
   unset GH_COMMENTS_OUTPUT
 
   # A refusal is also neutral, never a failure.
@@ -1047,7 +1069,7 @@ case_evidence_paths() {
 
   # The report still reaches the repository; the job still ends red.
   check_eq "the report is committed even though evidence was refused" \
-    "Verging Memory CI: report for 2.31.0 ($rid): Not ready: 1 accuracy failure" \
+    "Verging Memory CI: report for 2.31.0 ($rid): Not ready: 1 accuracy failure [skip ci]" \
     "$(git -C "$ORIGIN" log -1 --format=%s main)"
   run_step set_outputs.sh
   check_exit "the run ends red when a named evidence file is missing" 1 "$STEP_EXIT"
@@ -1239,7 +1261,7 @@ seed_pending_release() { # $1 release id, $2 vendor_version, $3 submitted_at: a 
   (
     cd "$WORKSPACE"
     git add "$FOLDER"
-    git commit -qm "Verging Memory CI: release $2 ($1) is pending; the report follows"
+    git commit -qm "Verging Memory CI: release $2 ($1) is pending; the report follows [skip ci]"
     git push -q origin HEAD:main
   )
 }
@@ -1275,7 +1297,7 @@ case_timeout_pending() {
   check_no_path "no index row without a report" "$WORKSPACE/$FOLDER/releases/index.md"
   check_file "folder README written" "$WORKSPACE/$FOLDER/README.md"
   check_eq "the pending record is committed and pushed" \
-    "Verging Memory CI: release 2.31.0 ($rid) is pending; the report follows" \
+    "Verging Memory CI: release 2.31.0 ($rid) is pending; the report follows [skip ci]" \
     "$(git -C "$ORIGIN" log -1 --format=%s main)"
   check_grep "the commit carries the pending record" "$FOLDER/releases/pending.json" <(git -C "$ORIGIN" show --name-only --format= main)
   check_grep "output release_id" "release_id=$rid" "$GITHUB_OUTPUT"
@@ -1311,7 +1333,7 @@ case_timeout_pending() {
   check_dirs_equal "latest/ is the release directory" "$dir" "$WORKSPACE/$FOLDER/latest"
   check_no_path "the pending record is cleared (the file goes with its last entry)" "$pending"
   check_eq "committed exactly as a fresh delivery" \
-    "Verging Memory CI: report for 2.31.0 ($rid): Ready" \
+    "Verging Memory CI: report for 2.31.0 ($rid): Ready [skip ci]" \
     "$(git -C "$ORIGIN" log -1 --format=%s main)"
   check_eq "the pending record is gone from the branch" "" "$(git -C "$ORIGIN" ls-tree -r --name-only main | grep -F pending.json || true)"
   check_eq "nothing was submitted by the sync job" "0" "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
@@ -1342,7 +1364,7 @@ case_pending_running_then_failed() {
   check_file "the pending record stays" "$pending"
   check_eq "the entry is untouched" "running" "$(jq -r --arg rid "$rid" '.[$rid].status' "$pending")"
   check_eq "nothing was committed" \
-    "Verging Memory CI: release 2.31.0 ($rid) is pending; the report follows" \
+    "Verging Memory CI: release 2.31.0 ($rid) is pending; the report follows [skip ci]" \
     "$(git -C "$ORIGIN" log -1 --format=%s main)"
 
   # 2. Failed on the Verging side: the index says so, the entry goes, green.
@@ -1357,7 +1379,7 @@ case_pending_running_then_failed() {
   check_no_path "no release directory for a failed release" "$WORKSPACE/$FOLDER/releases/2026-08-15-2.31.0"
   check_no_path "no latest/ for a failed release" "$WORKSPACE/$FOLDER/latest"
   check_eq "the failure line is committed and pushed" \
-    "Verging Memory CI: release 2.31.0 ($rid) failed on the Verging side" \
+    "Verging Memory CI: release 2.31.0 ($rid) failed on the Verging side [skip ci]" \
     "$(git -C "$ORIGIN" log -1 --format=%s main)"
   check_grep "the job summary says which release failed" "failed on the Verging side" "$GITHUB_STEP_SUMMARY"
   end_case
@@ -1389,7 +1411,7 @@ case_fetch_only_pending() {
     "$(jq -c --arg rid "$rid" '.[$rid]' "$WORKSPACE/$FOLDER/releases/pending.json")"
   check_grep "output verdict is Pending" "verdict=Pending" "$GITHUB_OUTPUT"
   check_eq "the pending record is committed with the status body's version" \
-    "Verging Memory CI: release 2.30.9 ($rid) is pending; the report follows" \
+    "Verging Memory CI: release 2.30.9 ($rid) is pending; the report follows [skip ci]" \
     "$(git -C "$ORIGIN" log -1 --format=%s main)"
   check_grep "check run conclusion is neutral" "conclusion=neutral" "$GH_SHIM_LOG"
 
@@ -1434,7 +1456,7 @@ case_pending_after_fetch_failure() {
   check_grep "the error names the report route" "::error::GET /v1/releases/$rid/report returned HTTP 409" "$CASE_TMP/run.log"
   run_step commit_push.sh;     check_exit "commit_push exits 0" 0 "$STEP_EXIT"
   check_eq "only the pending record is committed" \
-    "Verging Memory CI: release 2.31.0 ($rid) is pending; the report follows" \
+    "Verging Memory CI: release 2.31.0 ($rid) is pending; the report follows [skip ci]" \
     "$(git -C "$ORIGIN" log -1 --format=%s main)"
   check_eq "the commit carries the pending record and nothing else" "$FOLDER/releases/pending.json" "$(git -C "$ORIGIN" show --name-only --format= main)"
   check_eq "the entry carries the last status seen" "report_ready" "$(jq -r --arg rid "$rid" '.[$rid].status' "$WORKSPACE/$FOLDER/releases/pending.json")"
@@ -1449,7 +1471,7 @@ case_pending_after_fetch_failure() {
   local dir="$WORKSPACE/$FOLDER/releases/2026-08-15-2.31.0"
   check_file "the pending release's report is written" "$dir/REPORT.md"
   check_eq "the pending release's report is committed as a fresh delivery" \
-    "Verging Memory CI: report for 2.31.0 ($rid): Ready" \
+    "Verging Memory CI: report for 2.31.0 ($rid): Ready [skip ci]" \
     "$(git -C "$ORIGIN" log -1 --format=%s main)"
   check_no_path "the pending record is cleared" "$WORKSPACE/$FOLDER/releases/pending.json"
   check_eq "this job's own vendor_version is left as resolved" "2.32.0" "$(cat "$RUNNER_TEMP/verging-memory-ci-state/vendor_version")"

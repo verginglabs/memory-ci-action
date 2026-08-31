@@ -37,14 +37,16 @@ committed=0
 checked=0
 
 # commit_folder MESSAGE: commit whatever changed in the folder; true when a
-# commit was made.
+# commit was made. Every report commit carries [skip ci] so the push of a
+# report can never start another CI job on the customer's repository (GitHub
+# Actions honors it; commit_push.sh does the same on its own commits).
 commit_folder() {
   git_config_identity
   git add -A -- "$folder"
   if git diff --cached --quiet; then
     return 1
   fi
-  git commit -m "$1"
+  git commit -m "$1 [skip ci]"
   committed=1
   return 0
 }

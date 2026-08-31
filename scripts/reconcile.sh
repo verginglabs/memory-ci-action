@@ -15,7 +15,9 @@
 #      is the newest, and the index row says final.
 #
 # Every change is committed and pushed from here, so a report is never lost
-# to a job that happened before it was out.
+# to a job that happened before it was out. A refused push fails the job with
+# the named error of push_report_commit (lib.sh); the pending record and the
+# preliminary report stay on the branch, so the next job collects again.
 set -euo pipefail
 source "${GITHUB_ACTION_PATH:?GITHUB_ACTION_PATH is not set}/scripts/lib.sh"
 
@@ -191,7 +193,7 @@ for rel in "$releases_dir"/*/; do
 done
 
 if [ "$committed" = "1" ]; then
-  push_with_fallback
+  push_report_commit
 elif [ "$checked" = "0" ]; then
   echo "Nothing to reconcile; no release is pending and every report on record is already final."
 fi

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Commit the report folder and push it to the triggering branch, with a
-# fetch and rebase retry. A push that still fails never fails the job: the
-# commit is delivered on the branch verging-memory-ci/reports with a pull
-# request into the default branch (see push_with_fallback in lib.sh).
+# Commit the report folder and push it to the branch this job ran on, with a
+# fetch and rebase retry. A push that is still refused FAILS the job with a
+# named error saying what to allow; no other branch is written and no pull
+# request is opened unless the fallback_pull_request input is on (see
+# push_report_commit in lib.sh).
 #
 # This step runs whenever the job was not cancelled, so a release the job
 # stopped waiting for is committed as pending (releases/pending.json), and so
@@ -34,7 +35,7 @@ if [ -z "$release_id" ] || [ -z "$verdict" ]; then
       [ -n "$vendor_version" ] || vendor_version="$(pending_version)"
       git commit -m "Verging Memory CI: release $vendor_version ($release_id) is pending; the report follows"
       echo "The report was not fetched this run; the release is committed as pending, and the next job collects its report."
-      push_with_fallback
+      push_report_commit || exit 1
       exit 0
     fi
   fi
@@ -62,4 +63,4 @@ elif [ "$verdict" = "Pending" ]; then
 else
   git commit -m "Verging Memory CI: report for $vendor_version ($release_id): $verdict"
 fi
-push_with_fallback
+push_report_commit

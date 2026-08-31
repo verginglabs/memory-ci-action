@@ -307,9 +307,14 @@ index_newest_date() {
 # folder yet:
 #
 #   {"<release_id>": {"vendor_version": "2.31.0",
-#                     "environments": ["Claude Code Opus 5"],
+#                     "agent_setups": ["Claude Code Opus 5"],
 #                     "submitted_at": "2026-08-26T09:12:04.118Z",
 #                     "status": "running"}}
+#
+# An entry written by an earlier version of this action names the setups
+# under "environments"; pending_get reads it as agent_setups, and the entry
+# is rewritten under the current name the next time its status is brought
+# up to date.
 #
 # The entry is written right after the 202 receipt, its status is brought up
 # to date when the job stops waiting, and it is committed with the folder.
@@ -334,12 +339,17 @@ pending_set() {
   jq --arg id "$id" --argjson entry "$entry" '.[$id] = $entry' "$f" > "$tmp" && mv "$tmp" "$f"
 }
 
-# pending_get FOLDER RELEASE_ID: the entry as one JSON line, or empty.
+# pending_get FOLDER RELEASE_ID: the entry as one JSON line, or empty. An
+# entry from an earlier version, keyed "environments", is read as
+# agent_setups.
 pending_get() {
   local f
   f="$(pending_path "$1")"
   [ -f "$f" ] || return 0
-  jq -c --arg id "$2" '.[$id] // empty' "$f" 2>/dev/null || true
+  jq -c --arg id "$2" '.[$id] // empty
+    | if type == "object" and has("environments") and (has("agent_setups") | not)
+      then {vendor_version, agent_setups: .environments} + (del(.environments) | del(.vendor_version))
+      else . end' "$f" 2>/dev/null || true
 }
 
 # pending_set_status FOLDER RELEASE_ID STATUS: bring an entry's last status
@@ -609,12 +619,16 @@ fetch_and_write_wiring() {
   return 0
 }
 
-# push_with_fallback: push HEAD to the triggering branch with a fetch and
-# rebase retry. If the push still fails, the job does NOT fail: the same
-# commit is delivered on the branch verging-memory-ci/reports with a pull
-# request into the default branch.
-push_with_fallback() {
-  local branch attempt default_branch existing
+# push_report_commit: push HEAD to the branch this job ran on, with a fetch
+# and rebase retry. When the push is still refused the job FAILS with a named
+# error that says which branch refused it and what to allow (the workflow's
+# token needs push permission on that branch). Nothing else is written: no
+# other branch, no pull request. The one exception is the fallback_pull_request
+# input (off by default, and never honoured during a wiring check): with it
+# the same commit is delivered on the branch verging-memory-ci/reports with a
+# pull request into the default branch, and the job stays green.
+push_report_commit() {
+  local branch attempt
   branch="${GITHUB_HEAD_REF:-}"
   [ -n "$branch" ] || branch="${GITHUB_REF_NAME:-}"
   if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
@@ -634,7 +648,59 @@ push_with_fallback() {
     git rebase "origin/$branch" || { git rebase --abort 2>/dev/null || true; }
   done
 
-  echo "::warning::could not push the report commit to $branch after 3 attempts; delivering it on the branch verging-memory-ci/reports instead. The job does not fail on this."
+  if fallback_pull_request_wanted; then
+    deliver_on_reports_branch "$branch"
+    return 0
+  fi
+  push_refused "$branch"
+  return 1
+}
+
+# fallback_pull_request_wanted: true only when the fallback_pull_request input
+# is on AND this job is not a wiring check (neither the input's own wiring
+# check nor a release turned into one): a wiring check's page must land on the
+# branch the job ran on, or the check proves nothing.
+fallback_pull_request_wanted() {
+  [ "$(state_get fallback_pull_request)" = "true" ] || return 1
+  if [ "$(state_get wiring_check)" = "true" ] || [ "$(state_get wiring_done)" = "1" ]; then
+    echo "fallback_pull_request is on, but this job is a wiring check: its page must land on the branch the job ran on, so no other branch is written and no pull request is opened."
+    return 1
+  fi
+  return 0
+}
+
+# push_refused BRANCH: the named error that fails the job when the push of
+# the report commit was refused. It says what to allow and how to recover;
+# the recovery depends on what this job was doing.
+push_refused() {
+  local branch="$1" id recover
+  id="$(state_get release_id)"
+  if [ "$(state_get wiring_done)" = "1" ]; then
+    recover="Then re-run this workflow: the wiring check is free and is performed again."
+  elif [ -n "$id" ]; then
+    recover="Then re-run with fetch_only_release_id=$id to fetch and commit this report without submitting anything."
+  else
+    recover="Then re-run this workflow: the reports it collected are fetched and committed again."
+  fi
+  state_set push_path "refused"
+  echo "::error title=Verging Memory CI push refused::The report commit could not be pushed to $branch after 3 attempts, so it is not in your repository. Nothing else was written: no other branch, no pull request. Fix: allow the workflow's token to push to $branch. The workflow needs 'permissions: contents: write', and any ruleset or branch protection on $branch must let this workflow push (exempt it in the rule, or run the workflow on a branch the rule does not cover); a pull request from a fork runs with a read-only token, so push the branch to this repository instead. $recover"
+  {
+    echo "## Verging Memory CI: push to \`$branch\` refused"
+    echo
+    echo "The report commit could not be pushed to \`$branch\` after 3 attempts, so it is not in your repository. Nothing else was written: no other branch, no pull request."
+    echo
+    echo "Allow the workflow's token to push to \`$branch\`: the workflow needs \`permissions: contents: write\`, and any ruleset or branch protection on \`$branch\` must let this workflow push. $recover"
+    echo
+  } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+}
+
+# deliver_on_reports_branch BRANCH: the fallback_pull_request delivery. The
+# commit is force-pushed to verging-memory-ci/reports and a pull request into
+# the default branch is opened for it, or the open one is named. The job does
+# not fail on this path.
+deliver_on_reports_branch() {
+  local branch="$1" default_branch existing
+  echo "::warning::could not push the report commit to $branch after 3 attempts; fallback_pull_request is on, so it is delivered on the branch verging-memory-ci/reports instead. The job does not fail on this."
   if ! git push --force origin "HEAD:refs/heads/verging-memory-ci/reports"; then
     echo "::warning::the push to verging-memory-ci/reports failed too. The report stays in this run's log; re-run with fetch_only_release_id=$(state_get release_id) once pushing works again, to fetch and commit it without submitting anything."
     state_set push_path "none"

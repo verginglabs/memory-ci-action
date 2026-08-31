@@ -885,7 +885,7 @@ case_reconcile_push_refused() {
   check_push_refused_cleanly
   check_grep "the recovery is to re-run" "re-run this workflow: the reports it collected are fetched and committed again" "$CASE_TMP/run.log"
   check_eq "origin main still carries the pending record, so the next job collects again" \
-    "Verging Memory CI: release 2.31.0 ($rid) is pending; the report follows" \
+    "Verging Memory CI: release 2.31.0 ($rid) is pending; the report follows [skip ci]" \
     "$(git -C "$ORIGIN" log -1 --format=%s main)"
   run_step commit_push.sh;     check_exit "the commit step has nothing of its own to commit" 0 "$STEP_EXIT"
   unset VERGING_MODE VERGING_DEFAULT_BRANCH

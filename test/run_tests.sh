@@ -841,6 +841,7 @@ seed_surfaces_state() { # $1 verdict
   printf '%s' "run_20260815_186efbad9769" > "$sd/release_id"
   printf '%s' "$FOLDER/releases/2026-08-15-2.31.0/REPORT.md" > "$sd/report_path"
   printf '%s' "feature-x" > "$sd/pushed_ref"
+  printf '%s' "2.31.0" > "$sd/vendor_version"
 }
 
 case_surfaces() {
@@ -860,7 +861,9 @@ case_surfaces() {
   check_grep "Not ready posts conclusion neutral" "conclusion=neutral" "$GH_SHIM_LOG"
   check_grep "comment created on the pull request" "issues/12/comments" "$GH_SHIM_LOG"
   check_grep "comment body starts with the marker" "<!-- verging-memory-ci -->" "$GH_SHIM_LOG"
-  check_grep "comment body carries the release id" "run_20260815_186efbad9769" "$GH_SHIM_LOG"
+  check_grep "comment body names the release by vendor_version" "Release 2.31.0. [Read the report]" "$GH_SHIM_LOG"
+  check_eq "comment body carries no release id (it stays in release.json)" "0" "$(grep 'issues/12/comments' "$GH_SHIM_LOG" | grep -c 'run_20260815_186efbad9769')"
+  check_grep "the check run summary still names the release id" "run_20260815_186efbad9769" "$GH_SHIM_LOG"
   check_grep "comment links the committed report" "/acme/widget/blob/feature-x/Verging%20Memory%20CI/releases/2026-08-15-2.31.0/REPORT.md" "$GH_SHIM_LOG"
 
   # A later run updates the same comment in place.

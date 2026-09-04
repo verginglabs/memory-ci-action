@@ -97,10 +97,16 @@ if [ "$event" = "pull_request" ] && [ -n "$pr_number" ] && [ -n "$repo" ]; then
     body="<!-- verging-memory-ci -->
 **Verging Memory CI: report pending.** $(pending_line)"
   else
+    # The release line names the customer's own version (vendor_version, as
+    # resolve_inputs.sh resolved it: the input, else the VERSION file, else the
+    # short commit SHA); the release id stays in release.json.
+    vendor_version="$(state_get vendor_version)"
+    release_line=""
+    [ -n "$vendor_version" ] && release_line="Release $vendor_version. "
     body="<!-- verging-memory-ci -->
 **Verging Memory CI: $verdict**
 
-Release \`$release_id\`. [Read the report]($link)."
+${release_line}[Read the report]($link)."
   fi
   existing="$(gh api "repos/$repo/issues/$pr_number/comments" --paginate \
     --jq '.[] | select(.body | startswith("<!-- verging-memory-ci -->")) | .id' 2>/dev/null \

@@ -210,6 +210,39 @@ extract_verdict() {
   printf '%s' "$verdict"
 }
 
+# first_report_flag REPORT_JSON VERDICT: "1" when this is a first report, the
+# one with no earlier release on the agent setups to compare against, so it
+# records a baseline instead of giving a release verdict. The two signals
+# arrive together and either is enough: the Release verdict row opens with
+# "Baseline recorded", and diff.json carries release_verdict null with the
+# reason first_report.
+first_report_flag() {
+  local report="$1" verdict="$2"
+  case "$verdict" in
+    "Baseline recorded"*) printf '1'; return 0 ;;
+  esac
+  if [ -f "$report" ] && jq -e '
+      (.diff != null)
+      and (.diff.release_verdict == null)
+      and ((((.diff.release_verdict_reasons // .diff.reasons) // []) | index("first_report")) != null)
+    ' "$report" >/dev/null 2>&1; then
+    printf '1'
+    return 0
+  fi
+  printf ''
+}
+
+# verdict_cell REPORT_JSON VERDICT: what the Release verdict column of the
+# index row says. A first report's row says "Baseline recorded"; the whole
+# baseline sentence stays in the report itself.
+verdict_cell() {
+  if [ -n "$(first_report_flag "$1" "$2")" ]; then
+    printf '%s' "Baseline recorded"
+  else
+    printf '%s' "$2"
+  fi
+}
+
 # slug_for RELEASE_DATE VENDOR_VERSION RELEASE_ID FOLDER: the release
 # directory name. Folders are named by the release (its date and version),
 # not by the internal id; the id lives in release.json and the index. A
@@ -487,7 +520,7 @@ poll_release() {
 # when a newer release's report is already on record.
 fetch_and_write() {
   local id="$1" release_date="$2" latest_mode="${3:-}"
-  local folder report code vendor_version slug dir verdict stage rstatus due
+  local folder report code vendor_version slug dir verdict stage rstatus due first_report
   folder="$(state_get folder)"
   report="$(state_dir)/report.json"
   code="$(api_get "/v1/releases/$id/report" "$report")"
@@ -512,6 +545,12 @@ fetch_and_write() {
   ensure_folder_readme "$folder"
 
   verdict="$(extract_verdict "$report" "$dir/REPORT.md")"
+  first_report="$(first_report_flag "$report" "$verdict")"
+  # A report with the machine signal but no verdict row still reads as the
+  # baseline it is.
+  if [ -n "$first_report" ] && [ "$verdict" = "not recorded" ]; then
+    verdict="Baseline recorded"
+  fi
   stage="$(jq -r '.diff.stage // "not recorded"' "$report")"
   rstatus="$(jq -r '.status // "not recorded"' "$report")"
   due="$(jq -r '.corrections_due_by // "-"' "$report")"
@@ -519,13 +558,14 @@ fetch_and_write() {
   echo "Stage: $stage   status: $rstatus   corrections_due_by: $due"
 
   index_put_row "$folder" "$id" \
-    "| $release_date | $vendor_version | [$id]($slug/REPORT.md) | $verdict | $stage |"
+    "| $release_date | $vendor_version | [$id]($slug/REPORT.md) | $(verdict_cell "$report" "$verdict") | $stage |"
   # The report is in the folder: the release is no longer pending.
   pending_clear "$folder" "$id"
 
   state_set vendor_version "$vendor_version"
   state_set release_id "$id"
   state_set verdict "$verdict"
+  state_set first_report "$first_report"
   state_set slug "$slug"
   state_set report_path "$folder/releases/$slug/REPORT.md"
 

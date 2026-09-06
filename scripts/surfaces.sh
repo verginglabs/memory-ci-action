@@ -12,6 +12,13 @@ source "${GITHUB_ACTION_PATH:?GITHUB_ACTION_PATH is not set}/scripts/lib.sh"
 verdict="$(state_get verdict)"
 release_id="$(state_get release_id)"
 report_path="$(state_get report_path)"
+# A first report has no release verdict to copy: its verdict row records the
+# baseline instead. The report writer records it in the state, and the row's
+# own words say the same thing.
+first_report="$(state_get first_report)"
+case "$verdict" in
+  "Baseline recorded"*) first_report="1" ;;
+esac
 
 if [ -z "$release_id" ] || [ -z "$verdict" ]; then
   echo "No report this run; no check or comment to post."
@@ -66,6 +73,14 @@ elif [ "$verdict" = "Pending" ]; then
   pending="1"
   title="Report pending"
   summary="$(pending_line)"
+elif [ "$first_report" = "1" ]; then
+  # A first report is a baseline, not a verdict: conclusion neutral, the
+  # named title, and the report's own baseline sentence beneath it.
+  conclusion="neutral"
+  title="Verging Memory CI: baseline recorded"
+  summary="$verdict
+
+Release \`$release_id\`. Report: \`$report_path\`."
 fi
 
 if [ -n "$repo" ] && [ -n "$head_sha" ]; then
@@ -90,6 +105,12 @@ if [ "$event" = "pull_request" ] && [ -n "$pr_number" ] && [ -n "$repo" ]; then
   [ -n "$branch" ] || branch="${GITHUB_HEAD_REF:-main}"
   encoded_path="$(printf '%s' "$report_path" | sed 's/ /%20/g')"
   link="/$repo/blob/$branch/$encoded_path"
+  # The release line names the customer's own version (vendor_version, as
+  # resolve_inputs.sh resolved it: the input, else the VERSION file, else the
+  # short commit SHA); the release id stays in release.json.
+  vendor_version="$(state_get vendor_version)"
+  release_line=""
+  [ -n "$vendor_version" ] && release_line="Release $vendor_version."
   # blob_link PATH LABEL: an HTML anchor to the committed file that opens in a
   # new tab (target="_blank": a plain markdown link would navigate the pull
   # request tab away from the review). Spaces are the one report-folder path
@@ -117,11 +138,25 @@ if [ "$event" = "pull_request" ] && [ -n "$pr_number" ] && [ -n "$repo" ]; then
     [ -f "$release_dir/diff.json" ] && files="$files | $(blob_link "$release_dir/diff.json" "diff.json")"
     index_path="$(dirname "$release_dir")/index.md"
     [ -f "$index_path" ] && files="$files | $(blob_link "$index_path" "All releases")"
-    if [ -n "$glance" ]; then
-      body="<!-- verging-memory-ci -->
-**Verging Memory CI: $verdict**
+    # A first report has no verdict to head the comment with: the heading
+    # names the baseline, and the report's own baseline sentence is the first
+    # line under it.
+    heading="**Verging Memory CI: $verdict**"
+    lead=""
+    if [ "$first_report" = "1" ]; then
+      heading="**Verging Memory CI: baseline recorded**"
+      lead="$verdict"
+    fi
+    body="<!-- verging-memory-ci -->
+$heading"
+    [ -n "$lead" ] && body="$body
 
-Release \`$release_id\`.
+$lead"
+    [ -n "$release_line" ] && body="$body
+
+$release_line"
+    if [ -n "$glance" ]; then
+      body="$body
 
 ### Results at a glance
 $glance
@@ -130,10 +165,9 @@ $files"
     else
       # The committed report (or its glance section) is not readable here; the
       # comment still says what happened and where the report is.
-      body="<!-- verging-memory-ci -->
-**Verging Memory CI: $verdict**
+      body="$body
 
-Release \`$release_id\`. $files"
+$files"
     fi
   fi
   existing="$(gh api "repos/$repo/issues/$pr_number/comments" --paginate \

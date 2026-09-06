@@ -91,6 +91,7 @@ for id in $(pending_ids "$folder"); do
       saved_version="$(state_get vendor_version)"
       saved_id="$(state_get release_id)"
       saved_verdict="$(state_get verdict)"
+      saved_first_report="$(state_get first_report)"
       saved_slug="$(state_get slug)"
       saved_path="$(state_get report_path)"
       state_set vendor_version "$version"
@@ -102,6 +103,7 @@ for id in $(pending_ids "$folder"); do
       state_set vendor_version "$saved_version"
       state_set release_id "$saved_id"
       state_set verdict "$saved_verdict"
+      state_set first_report "$saved_first_report"
       state_set slug "$saved_slug"
       state_set report_path "$saved_path"
       if [ "$written" != "1" ]; then
@@ -182,7 +184,7 @@ for rel in "$releases_dir"/*/; do
   esac
   [ -n "$release_date" ] || release_date="$(date -u +%Y-%m-%d)"
   index_update_row "$folder" "$id" \
-    "| $release_date | $version | [$id]($slug/REPORT.md) | $verdict | final |"
+    "| $release_date | $version | [$id]($slug/REPORT.md) | $(verdict_cell "$report" "$verdict") | final |"
 
   # latest/ is refreshed only when this release is the newest one on record.
   if [ "$(jq -r '.release_id // empty' "$folder/latest/release.json" 2>/dev/null)" = "$id" ]; then

@@ -944,10 +944,11 @@ seed_surfaces_state() { # $1 verdict
   printf '%s' "run_20260815_186efbad9769" > "$sd/release_id"
   printf '%s' "$FOLDER/releases/2026-08-15-2.31.0/REPORT.md" > "$sd/report_path"
   printf '%s' "feature-x" > "$sd/pushed_ref"
+  printf '%s' "2.31.0" > "$sd/vendor_version"
 }
 
 case_surfaces() {
-  begin_case "check run and comment: neutral is never a failure, one comment per pull request, the comment carries the report's Results at a glance"
+  begin_case "check run and comment: neutral is never a failure, one comment per pull request, the comment carries the report's Results at a glance, a first report reads as a baseline"
   MOCK_PORT="0"
   setup_env
   make_repos
@@ -965,7 +966,9 @@ case_surfaces() {
   check_grep "Not ready posts conclusion neutral" "conclusion=neutral" "$GH_SHIM_LOG"
   check_grep "comment created on the pull request" "issues/12/comments" "$GH_SHIM_LOG"
   check_grep "comment body starts with the marker" "<!-- verging-memory-ci -->" "$GH_SHIM_LOG"
-  check_grep "comment body carries the release id" "run_20260815_186efbad9769" "$GH_SHIM_LOG"
+  check_grep "comment body names the release by vendor_version" "Release 2.31.0." "$GH_SHIM_LOG"
+  check_eq "comment body carries no release id (it stays in release.json)" "0" "$(grep 'issues/12/comments' "$GH_SHIM_LOG" | grep -c 'run_20260815_186efbad9769')"
+  check_grep "the check run summary still names the release id" "run_20260815_186efbad9769" "$GH_SHIM_LOG"
   check_grep "comment links the committed report" "/acme/widget/blob/feature-x/Verging%20Memory%20CI/releases/2026-08-15-2.31.0/REPORT.md" "$GH_SHIM_LOG"
   check_grep "the report link is an anchor that opens in a new tab" \
     '<a href="https://github.com/acme/widget/blob/feature-x/Verging%20Memory%20CI/releases/2026-08-15-2.31.0/REPORT.md" target="_blank">Full report</a>' \
@@ -1009,6 +1012,70 @@ case_surfaces() {
   check_exit "surfaces exits 0 when gh itself fails" 0 "$STEP_EXIT"
   check_grep "the gh failure is only a warning" "could not post the check run" "$CASE_TMP/run.log"
   unset GH_SHIM_FAIL
+
+  # A first report: nothing earlier on the agent setups to compare against,
+  # so the report records a baseline and carries no release verdict
+  # (release_verdict null, reason first_report). The whole pipeline runs
+  # against the mock, so the index row, diff.json and both surfaces are the
+  # delivered ones.
+  local rid="run_20260906_1c0de5a2b7f4" baseline md scenario gate_rc=0
+  baseline="Baseline recorded: 11 of 11 tests passing on Claude Code Opus 5. The release verdict starts with your next release."
+  md="$(make_report_md "Larkspur 2.31.0" "$baseline" "Preliminary report (the final report follows)")"
+  scenario="$(jq -n --arg md "$md" --arg rid "$rid" '{
+    receipt: {release_id: $rid, received_at: "2026-09-06T09:10:00.000Z",
+              scope: {suites: ["core-recall"]}},
+    statuses: [{release_id: $rid, status: "report_ready", corrections_due_by: "2026-09-09"}],
+    report: {
+      release_id: $rid, status: "report_ready", vendor_version: "2.31.0",
+      scope: {suites: ["core-recall"]}, corrections_due_by: "2026-09-09",
+      report_markdown: $md,
+      diff: {format: "release-diff/v1", verdict: "pass", cost_verdict: "pass",
+             release_verdict: null, release_verdict_reasons: ["first_report"],
+             stage: "preliminary"},
+      evidence: []
+    }
+  }')"
+  rm -rf "$CASE_TMP/origin.git" "$CASE_TMP/workspace"
+  start_mock "$scenario" || { end_case; return; }
+  setup_env
+  make_repos
+  export GITHUB_EVENT_NAME="pull_request"
+  export GITHUB_HEAD_REF="feature-x"
+  export GITHUB_EVENT_PATH="$CASE_TMP/event.json"
+
+  run_step resolve_inputs.sh; check_exit "resolve_inputs exits 0 on a first report" 0 "$STEP_EXIT"
+  run_step reconcile.sh;      check_exit "reconcile exits 0 on a first report" 0 "$STEP_EXIT"
+  run_step run_release.sh;    check_exit "run_release exits 0 on a first report" 0 "$STEP_EXIT"
+  run_step commit_push.sh;    check_exit "commit_push exits 0 on a first report" 0 "$STEP_EXIT"
+  run_step surfaces.sh;       check_exit "surfaces exits 0 on a first report" 0 "$STEP_EXIT"
+
+  check_grep "the first report's check is titled baseline recorded" \
+    'output\[title\]=Verging\ Memory\ CI:\ baseline\ recorded' "$GH_SHIM_LOG"
+  check_grep "the first report's check is neutral" "conclusion=neutral" "$GH_SHIM_LOG"
+  check_eq "no check run concludes failure on a first report" "0" \
+    "$(grep -c 'conclusion=failure' "$GH_SHIM_LOG")"
+  check_grep "the check summary opens with the baseline sentence" \
+    "\$'output[summary]=$baseline" "$GH_SHIM_LOG"
+  check_grep "the comment heading names the baseline" \
+    "**Verging Memory CI: baseline recorded**" "$GH_SHIM_LOG"
+  check_grep "the baseline sentence is the first line of the comment after the heading" \
+    "**Verging Memory CI: baseline recorded**\\n\\n$baseline" "$GH_SHIM_LOG"
+  check_grep "the first report's comment names the release by vendor_version" \
+    "Release 2.31.0." "$GH_SHIM_LOG"
+  check_grep "the first report's comment links the committed report" \
+    'target="_blank">Full report</a>' "$GH_SHIM_LOG"
+  check_grep "the first report's comment inlines the glance" "### Results at a glance" "$GH_SHIM_LOG"
+  check_grep "the whole baseline sentence stays in the report" "$baseline" \
+    "$WORKSPACE/$FOLDER/latest/REPORT.md"
+  check_grep "the index row's verdict column reads Baseline recorded" \
+    "| 2026-09-06 | 2.31.0 | [$rid](2026-09-06-2.31.0/REPORT.md) | Baseline recorded | preliminary |" \
+    "$WORKSPACE/$FOLDER/releases/index.md"
+  check_eq "the delivered diff.json carries no release verdict" "null" \
+    "$(jq -r '.release_verdict | tostring' "$WORKSPACE/$FOLDER/latest/diff.json")"
+  check_eq "the delivered diff.json names the first_report reason" "first_report" \
+    "$(jq -r '.release_verdict_reasons[0] // empty' "$WORKSPACE/$FOLDER/latest/diff.json")"
+  jq -e '.release_verdict == "not_ready"' "$WORKSPACE/$FOLDER/latest/diff.json" >/dev/null 2>&1 || gate_rc=$?
+  check_eq "a workflow that fails on not_ready passes on a first report" "1" "$gate_rc"
   end_case
 }
 

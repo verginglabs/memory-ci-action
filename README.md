@@ -60,6 +60,19 @@ in place of a verdict. Verging Labs tells you when your suites are set up;
 pushes after that run real releases. To repeat the wiring check at any time,
 pass the input `wiring_check: "true"`.
 
+## Where the report lands
+
+Every job commits the report folder to the branch it ran on and pushes it with
+the workflow's own token, so that branch must accept pushes from this workflow
+(`permissions: contents: write` in the workflow, and no ruleset or branch
+protection that refuses it). When the push is refused the job fails with an
+error that names the branch and what to allow; the Action writes no other
+branch and never opens a pull request into your default branch on its own. To
+have a refused report commit delivered on the branch `verging-memory-ci/reports`
+with a pull request into your default branch instead, set the input
+`fallback_pull_request: "true"`; it is off by default and never applies to a
+wiring check.
+
 ## How long a job waits
 
 A release is usually still being tested when the default wait passes. The

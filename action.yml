@@ -49,6 +49,10 @@ inputs:
     description: "`release` (the default) submits a release and collects its report. `sync` submits nothing and collects any reports now ready for releases already in the report folder: the preliminary report of a release an earlier job stopped waiting for (recorded in releases/pending.json), and the final report of a release still on its preliminary report, which it replaces. In sync mode no environment is needed; do not combine it with fetch_only_release_id."
     required: false
     default: "release"
+  fallback_pull_request:
+    description: "Set to \"true\" to have a report commit whose push to the branch the job ran on was refused delivered on the branch verging-memory-ci/reports with a pull request into the repository's default branch, with the job staying green. Off by default: a refused push fails the job with an error that names the branch and the push permission the workflow's token needs, and the Action writes no other branch and opens no pull request. Never applies to a wiring check, whose page must land on the branch the job ran on."
+    required: false
+    default: "false"
   poll_timeout_minutes:
     description: "How many minutes the job waits for the report. A release is often still being tested when the default (45) passes: the job then ends green with the verdict output `Pending`, the release is recorded in the report folder's releases/pending.json, and the next job on any push, or a mode: sync job, commits the report once it is ready. Raise it to have the report land on the same job (a waiting job spends Actions minutes); 0 stops waiting right after the receipt."
     required: false
@@ -82,6 +86,7 @@ runs:
         VERGING_FETCH_ONLY_RELEASE_ID: ${{ inputs.fetch_only_release_id }}
         VERGING_WIRING_CHECK: ${{ inputs.wiring_check }}
         VERGING_POLL_TIMEOUT_MINUTES: ${{ inputs.poll_timeout_minutes }}
+        VERGING_FALLBACK_PULL_REQUEST: ${{ inputs.fallback_pull_request }}
         VERGING_MODE: ${{ inputs.mode }}
       run: '"$GITHUB_ACTION_PATH/scripts/resolve_inputs.sh"'
 

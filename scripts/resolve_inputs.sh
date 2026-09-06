@@ -17,6 +17,23 @@ if [ -n "${VERGING_LEGACY_ENVIRONMENTS:-}" ]; then
   exit 1
 fi
 
+# fallback_pull_request: "true" opts into the old delivery for a report
+# commit whose push to the branch the job ran on was refused: the commit on
+# the branch verging-memory-ci/reports with a pull request into the default
+# branch, and a green job. Off by default: a refused push fails the job with
+# an error naming the branch and what to allow, and nothing else is written.
+# Read in every mode (the reconcile pass pushes in sync mode too); never
+# honoured during a wiring check (see fallback_pull_request_wanted in lib.sh).
+fallback="${VERGING_FALLBACK_PULL_REQUEST:-false}"
+case "$fallback" in
+  true|false) ;;
+  *)
+    echo "::error::fallback_pull_request '$fallback' is not valid. Fix: use 'true' (a refused push of the report commit is delivered on the branch verging-memory-ci/reports with a pull request into the default branch) or 'false' (the default: a refused push fails the job with an error naming the branch and what to allow)."
+    exit 1
+    ;;
+esac
+state_set fallback_pull_request "$fallback"
+
 # mode: `release` (default) submits a release and collects its report; `sync`
 # submits nothing and lets the reconcile pass collect any reports now ready
 # for releases already in the report folder: the preliminary report of a
@@ -103,6 +120,9 @@ if [ "$wiring_check" = "true" ] && [ -n "${VERGING_FETCH_ONLY_RELEASE_ID:-}" ]; 
   exit 1
 fi
 state_set wiring_check "$wiring_check"
+if [ "$wiring_check" = "true" ] && [ "$fallback" = "true" ]; then
+  echo "fallback_pull_request is ignored during a wiring check: the page must land on the branch the job ran on, so a refused push fails the job and no pull request is opened."
+fi
 
 timeout="${VERGING_POLL_TIMEOUT_MINUTES:-45}"
 if ! printf '%s' "$timeout" | grep -Eq '^[0-9]+$'; then

@@ -110,25 +110,65 @@ if [ "$event" = "pull_request" ] && [ -n "$pr_number" ] && [ -n "$repo" ]; then
   # short commit SHA); the release id stays in release.json.
   vendor_version="$(state_get vendor_version)"
   release_line=""
-  [ -n "$vendor_version" ] && release_line="Release $vendor_version. "
+  [ -n "$vendor_version" ] && release_line="Release $vendor_version."
+  # blob_link PATH LABEL: an HTML anchor to the committed file that opens in a
+  # new tab (target="_blank": a plain markdown link would navigate the pull
+  # request tab away from the review). Spaces are the one report-folder path
+  # character a URL cannot carry raw.
+  server_url="${GITHUB_SERVER_URL:-https://github.com}"
+  blob_link() {
+    printf '<a href="%s/%s/blob/%s/%s" target="_blank">%s</a>' \
+      "$server_url" "$repo" "$branch" "$(printf '%s' "$1" | sed 's/ /%20/g')" "$2"
+  }
   if [ "$wiring" = "1" ]; then
     body="<!-- verging-memory-ci -->
 **Verging Memory CI: wiring check, not a release.** $(wiring_line "[read it]($link)")"
   elif [ "$pending" = "1" ]; then
     body="<!-- verging-memory-ci -->
 **Verging Memory CI: report pending.** $(pending_line)"
-  elif [ "$first_report" = "1" ]; then
-    body="<!-- verging-memory-ci -->
-**Verging Memory CI: baseline recorded**
-
-$verdict
-
-${release_line}[Read the report]($link)."
   else
+    # The report summary comment: the committed REPORT.md's own "Results at a
+    # glance" section inline (the verdict's figures, readable without leaving
+    # the pull request), then the committed files, each opening in a new tab.
+    # One comment per pull request: a rerun updates the marker-bearing comment
+    # in place below instead of stacking a second one.
+    release_dir="${report_path%/REPORT.md}"
+    glance="$(awk '/^## Results at a glance$/{on=1; next} on && /^## /{exit} on{print}' "$report_path" 2>/dev/null)"
+    files="$(blob_link "$report_path" "Full report")"
+    [ -f "$release_dir/diff.json" ] && files="$files | $(blob_link "$release_dir/diff.json" "diff.json")"
+    index_path="$(dirname "$release_dir")/index.md"
+    [ -f "$index_path" ] && files="$files | $(blob_link "$index_path" "All releases")"
+    # A first report has no verdict to head the comment with: the heading
+    # names the baseline, and the report's own baseline sentence is the first
+    # line under it.
+    heading="**Verging Memory CI: $verdict**"
+    lead=""
+    if [ "$first_report" = "1" ]; then
+      heading="**Verging Memory CI: baseline recorded**"
+      lead="$verdict"
+    fi
     body="<!-- verging-memory-ci -->
-**Verging Memory CI: $verdict**
+$heading"
+    [ -n "$lead" ] && body="$body
 
-${release_line}[Read the report]($link)."
+$lead"
+    [ -n "$release_line" ] && body="$body
+
+$release_line"
+    if [ -n "$glance" ]; then
+      body="$body
+
+### Results at a glance
+$glance
+
+$files"
+    else
+      # The committed report (or its glance section) is not readable here; the
+      # comment still says what happened and where the report is.
+      body="$body
+
+$files"
+    fi
   fi
   existing="$(gh api "repos/$repo/issues/$pr_number/comments" --paginate \
     --jq '.[] | select(.body | startswith("<!-- verging-memory-ci -->")) | .id' 2>/dev/null \

@@ -15,7 +15,9 @@
 #      is the newest, and the index row says final.
 #
 # Every change is committed and pushed from here, so a report is never lost
-# to a job that happened before it was out.
+# to a job that happened before it was out. A refused push fails the job with
+# the named error of push_report_commit (lib.sh); the pending record and the
+# preliminary report stay on the branch, so the next job collects again.
 set -euo pipefail
 source "${GITHUB_ACTION_PATH:?GITHUB_ACTION_PATH is not set}/scripts/lib.sh"
 
@@ -35,14 +37,16 @@ committed=0
 checked=0
 
 # commit_folder MESSAGE: commit whatever changed in the folder; true when a
-# commit was made.
+# commit was made. Every report commit carries [skip ci] so the push of a
+# report can never start another CI job on the customer's repository (GitHub
+# Actions honors it; commit_push.sh does the same on its own commits).
 commit_folder() {
   git_config_identity
   git add -A -- "$folder"
   if git diff --cached --quiet; then
     return 1
   fi
-  git commit -m "$1"
+  git commit -m "$1 [skip ci]"
   committed=1
   return 0
 }
@@ -193,7 +197,7 @@ for rel in "$releases_dir"/*/; do
 done
 
 if [ "$committed" = "1" ]; then
-  push_with_fallback
+  push_report_commit
 elif [ "$checked" = "0" ]; then
   echo "Nothing to reconcile; no release is pending and every report on record is already final."
 fi

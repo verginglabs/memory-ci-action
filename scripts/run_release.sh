@@ -70,7 +70,7 @@ if [ -n "$fetch_only" ]; then
       if [ -z "$(pending_get "$folder" "$id")" ]; then
         pending_set "$folder" "$id" "$(jq -c --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
           vendor_version: (.vendor_version // "not-recorded"),
-          environments: (.environments.agent_setups // []),
+          agent_setups: (.agent_setups // .environments.agent_setups // []),
           submitted_at: (.received_at // $now),
           status: (.status // "unknown")}' "$status_file")"
       fi
@@ -253,7 +253,7 @@ pending_set "$folder" "$release_id" "$(jq -cn \
   --argjson agent_setups "$agent_setups_json" \
   --arg submitted_at "$submitted_at" \
   --arg status "$(jq -r '.status // "queued"' "$receipt")" \
-  '{vendor_version: $vendor_version, environments: $agent_setups, submitted_at: $submitted_at, status: $status}')"
+  '{vendor_version: $vendor_version, agent_setups: $agent_setups, submitted_at: $submitted_at, status: $status}')"
 echo "Release $release_id is on record as pending in $folder/releases/pending.json until its report reaches the folder."
 
 {

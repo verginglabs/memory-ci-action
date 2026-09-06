@@ -12,6 +12,13 @@ source "${GITHUB_ACTION_PATH:?GITHUB_ACTION_PATH is not set}/scripts/lib.sh"
 verdict="$(state_get verdict)"
 release_id="$(state_get release_id)"
 report_path="$(state_get report_path)"
+# A first report has no release verdict to copy: its verdict row records the
+# baseline instead. The report writer records it in the state, and the row's
+# own words say the same thing.
+first_report="$(state_get first_report)"
+case "$verdict" in
+  "Baseline recorded"*) first_report="1" ;;
+esac
 
 if [ -z "$release_id" ] || [ -z "$verdict" ]; then
   echo "No report this run; no check or comment to post."
@@ -66,6 +73,14 @@ elif [ "$verdict" = "Pending" ]; then
   pending="1"
   title="Report pending"
   summary="$(pending_line)"
+elif [ "$first_report" = "1" ]; then
+  # A first report is a baseline, not a verdict: conclusion neutral, the
+  # named title, and the report's own baseline sentence beneath it.
+  conclusion="neutral"
+  title="Verging Memory CI: baseline recorded"
+  summary="$verdict
+
+Release \`$release_id\`. Report: \`$report_path\`."
 fi
 
 if [ -n "$repo" ] && [ -n "$head_sha" ]; then
@@ -90,19 +105,26 @@ if [ "$event" = "pull_request" ] && [ -n "$pr_number" ] && [ -n "$repo" ]; then
   [ -n "$branch" ] || branch="${GITHUB_HEAD_REF:-main}"
   encoded_path="$(printf '%s' "$report_path" | sed 's/ /%20/g')"
   link="/$repo/blob/$branch/$encoded_path"
+  # The release line names the customer's own version (vendor_version, as
+  # resolve_inputs.sh resolved it: the input, else the VERSION file, else the
+  # short commit SHA); the release id stays in release.json.
+  vendor_version="$(state_get vendor_version)"
+  release_line=""
+  [ -n "$vendor_version" ] && release_line="Release $vendor_version. "
   if [ "$wiring" = "1" ]; then
     body="<!-- verging-memory-ci -->
 **Verging Memory CI: wiring check, not a release.** $(wiring_line "[read it]($link)")"
   elif [ "$pending" = "1" ]; then
     body="<!-- verging-memory-ci -->
 **Verging Memory CI: report pending.** $(pending_line)"
+  elif [ "$first_report" = "1" ]; then
+    body="<!-- verging-memory-ci -->
+**Verging Memory CI: baseline recorded**
+
+$verdict
+
+${release_line}[Read the report]($link)."
   else
-    # The release line names the customer's own version (vendor_version, as
-    # resolve_inputs.sh resolved it: the input, else the VERSION file, else the
-    # short commit SHA); the release id stays in release.json.
-    vendor_version="$(state_get vendor_version)"
-    release_line=""
-    [ -n "$vendor_version" ] && release_line="Release $vendor_version. "
     body="<!-- verging-memory-ci -->
 **Verging Memory CI: $verdict**
 

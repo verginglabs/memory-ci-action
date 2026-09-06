@@ -32,14 +32,24 @@ A job that stops waiting before the report is ready (its `poll_timeout_minutes` 
 
 ## What Verging Memory CI tests
 
-Every release of the memory product is run through the test suites selected in the workflow that runs the action, in real agent environments, and compared with the last release tested. The report reads out three dimensions: Accuracy, Speed, and Tokens. A report over part of the suites is a verdict on the suites selected and says so in its Test suites row. The first release on an environment has nothing earlier to compare against, so that report states what was measured, and its verdict is decided on accuracy alone.
+Every release of the memory product is run through the test suites selected in the workflow that runs the action, in real agent environments, and compared with the last release tested. The report reads out three dimensions: Accuracy, Speed, and Tokens. A report over part of the suites is a verdict on the suites selected and says so in its Test suites row. The first release on an environment has nothing earlier to compare against, so its report records a baseline instead of giving a verdict: the Release verdict row reads `Baseline recorded: <N of M tests passing per setup>. The release verdict starts with your next release.`, and the row in `releases/index.md` reads `Baseline recorded`.
 
 ## How to read a report
 
-1. **On a new report, read `latest/REPORT.md` top to bottom.** The Release verdict row at the top of the header table gives the call (Ready, or Not ready with the reason); the three lines under Results at a glance carry accuracy, speed, and tokens.
-2. **Gate on `latest/diff.json`.** `release_verdict == "not_ready"` is the report's own call. Or gate on the two dimensions separately: `verdict == "regressions_found"` (or `counts.regressed > 0`) means a test that passed on the previous release fails on this one, and `cost_verdict == "fail"` means the tests ran slower or used more tokens, outside expected variation. Gate on any of the three fields, as your release policy prefers; `release_verdict_reasons` names which dimensions fired.
+1. **On a new report, read `latest/REPORT.md` top to bottom.** The Release verdict row at the top of the header table gives the call (Ready, or Not ready with the reason, or Baseline recorded on a first release); the three lines under Results at a glance carry accuracy, speed, and tokens.
+2. **Gate on `latest/diff.json`.** `release_verdict == "not_ready"` is the report's own call. Or gate on the two dimensions separately: `verdict == "regressions_found"` (or `counts.regressed > 0`) means a test that passed on the previous release fails on this one, and `cost_verdict == "fail"` means the tests ran slower or used more tokens, outside expected variation. Gate on any of the three fields, as your release policy prefers; `release_verdict_reasons` names which dimensions fired. On a first report `release_verdict` is `null` and `release_verdict_reasons` is `["first_report"]`, so a workflow that fails on `release_verdict == "not_ready"` passes on it.
 3. **Read the failures, not just the count.** Every regression in the report carries what was asked, what the previous release answered, what this one answered, and what your memory returned to the asking session. That is usually enough to find the cause without reproducing anything.
 4. **Read the Test suites row before concluding anything.** If it names fewer than every suite, the report covers only the suites selected. A clean report over part of the suites is not a clean release.
 5. **Do not edit the files.** They are the delivered record. Put your own analysis in your own files.
+
+## What the first release's check says
+
+The check run on the first release, and the comment the action posts on a pull request, read:
+
+> **Verging Memory CI: baseline recorded**
+>
+> Baseline recorded: 11 of 11 tests passing on Claude Code Opus 5. The release verdict starts with your next release.
+
+The check is neutral, never a failure, and the report is committed to this folder exactly as every later report is. The release verdict starts with the next release, which has this one to compare against.
 
 Every term used in the reports (the verdict words, the score intervals, expected variation, the pricing basis) is defined in the reading guide: https://verginglabs.com/memory-ci/reading-guide. The integration guide is at https://verginglabs.com/memory-ci/integration.

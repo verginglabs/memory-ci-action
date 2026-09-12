@@ -25,7 +25,8 @@ writer is exercised rather than assumed:
 The fixtures also serve names the API never emits (a traversal attempt, a
 deeper path, an absolute path) so the refusal path is exercised too.
 
-Every request is appended to $MOCK_DIR/requests.log as one JSON line.
+Every request is appended to $MOCK_DIR/requests.log as one JSON line,
+with its headers (the Authorization value is never recorded).
 The chosen port is written to $MOCK_DIR/port.
 """
 import json
@@ -65,8 +66,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _record(self, body):
+        headers = {k.lower(): v for k, v in self.headers.items() if k.lower() != "authorization"}
         with open(os.path.join(MOCK_DIR, "requests.log"), "a") as f:
-            f.write(json.dumps({"method": self.command, "path": self.path, "body": body}) + "\n")
+            f.write(json.dumps({"method": self.command, "path": self.path, "body": body,
+                                "headers": headers}) + "\n")
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)

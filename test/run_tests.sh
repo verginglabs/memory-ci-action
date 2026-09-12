@@ -114,6 +114,7 @@ setup_env() {
   export GITHUB_EVENT_NAME="push"
   export GITHUB_REF_NAME="main"
   export GITHUB_SHA="1111111111111111111111111111111111111111"
+  export GITHUB_RUN_ID="4242"
   unset GITHUB_HEAD_REF GITHUB_EVENT_PATH GITHUB_WORKSPACE 2>/dev/null
   export GH_SHIM_LOG="$CASE_TMP/gh.log"
   : > "$GH_SHIM_LOG"
@@ -126,7 +127,7 @@ setup_env() {
   export VERGING_SUITES=""   # the action.yml default: omit -> all chosen suites
   unset VERGING_VENDOR_VERSION VERGING_ENDPOINT VERGING_FOLDER 2>/dev/null
   unset VERGING_PRODUCT_NAME VERGING_FETCH_ONLY_RELEASE_ID VERGING_POLL_TIMEOUT_MINUTES VERGING_MODE VERGING_LEGACY_ENVIRONMENTS 2>/dev/null
-  unset VERGING_DEFAULT_BRANCH VERGING_FALLBACK_PULL_REQUEST GH_PR_LIST_OUTPUT GH_COMMENTS_OUTPUT GH_SHIM_FAIL 2>/dev/null
+  unset VERGING_DEFAULT_BRANCH VERGING_FALLBACK_PULL_REQUEST GH_PR_LIST_OUTPUT GH_COMMENTS_OUTPUT GH_SHIM_FAIL VERGING_IDEMPOTENCY_KEY 2>/dev/null
 }
 
 make_repos() {
@@ -641,6 +642,92 @@ case_other_409_fails() {
   run_step run_release.sh;     check_exit "a refused wiring check fails the job" 1 "$STEP_EXIT"
   check_grep "the error names the wiring check" "::error::POST /v1/releases (wiring check) returned HTTP 401" "$CASE_TMP/run.log"
   check_no_path "no report folder written" "$WORKSPACE/$FOLDER"
+  end_case
+}
+
+posted_header() { # $1 index of the POST to /v1/releases, $2 header name (lower case): its value, or "null"
+  jq -rs --argjson i "$1" --arg h "$2" '[.[] | select(.method == "POST")][$i].headers[$h]' "$MOCK_DIR/requests.log"
+}
+
+case_idempotency_key() {
+  begin_case "every submission carries an Idempotency-Key: repository:sha:run_id, the wiring check under a :wiring suffix, the input verbatim, none outside a GitHub job, a reused key with changed inputs fails plainly"
+  local rid="run_20260815_186efbad9769" wid="run_20260825_0a1b2c3d4e5f"
+  local expected="acme/widget:1111111111111111111111111111111111111111:4242"
+  # 1. The normal submission: the key names the workflow run.
+  start_mock "$(happy_scenario "$rid")" || { end_case; return; }
+  setup_env
+  make_repos
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh
+  run_step run_release.sh;     check_exit "run_release exits 0" 0 "$STEP_EXIT"
+  check_eq "the release POST carries Idempotency-Key repository:sha:run_id" "$expected" "$(posted_header 0 idempotency-key)"
+  check_grep "the log names the key and what it buys" "Idempotency-Key: $expected (a re-run of this workflow run reuses the release" "$CASE_TMP/run.log"
+  check_grep "the receipt line says the re-run reuses this release" "a re-run of this workflow run reuses release $rid" "$CASE_TMP/run.log"
+  check_no_grep "no missing-key line inside a GitHub job" "No Idempotency-Key is sent" "$CASE_TMP/run.log"
+  check_grep "action.yml declares the idempotency_key input" "idempotency_key:" "$ROOT/action.yml"
+  check_grep "the README explains re-runs" "## Retries and re-runs" "$ROOT/README.md"
+
+  # 2. A reused receipt (the API answering a re-run with the release it
+  # already accepted, status beyond queued) is handled like a fresh one.
+  set_scenario "$(happy_scenario "$rid" | jq '.receipt.status = "running"')"
+  run_step run_release.sh;     check_exit "a reused 202 receipt proceeds like a fresh one" 0 "$STEP_EXIT"
+  check_grep "the reused receipt's status is echoed" "status:         running" "$CASE_TMP/run.log"
+  check_file "the report is written from the reused release" "$WORKSPACE/$FOLDER/releases/2026-08-15-2.31.0/REPORT.md"
+
+  # 3. The not_set_up fallback: the release under the key, the wiring check
+  # under the key with the :wiring suffix.
+  set_scenario "$(wiring_scenario "$wid" | jq --argjson r "$not_set_up_receipt" '.receipt_code = 409 | .receipt = $r')"
+  run_step run_release.sh;     check_exit "run_release exits 0 on the not_set_up 409" 0 "$STEP_EXIT"
+  check_eq "two requests: the release, then the wiring check" "2" "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
+  check_eq "the release POST carries the run's key" "$expected" "$(posted_header 0 idempotency-key)"
+  check_eq "the wiring check POST carries the key with the :wiring suffix" "$expected:wiring" "$(posted_header 1 idempotency-key)"
+
+  # 4. The wiring_check input: the :wiring suffix too.
+  set_scenario "$(wiring_scenario "$wid")"
+  export VERGING_WIRING_CHECK="true"
+  run_step resolve_inputs.sh
+  run_step run_release.sh;     check_exit "the wiring check input exits 0" 0 "$STEP_EXIT"
+  check_eq "the wiring check POST carries the key with the :wiring suffix" "$expected:wiring" "$(posted_header 0 idempotency-key)"
+  unset VERGING_WIRING_CHECK
+
+  # 5. The idempotency_key input is sent verbatim, and with the suffix on the
+  # wiring check.
+  set_scenario "$(wiring_scenario "$wid" | jq --argjson r "$not_set_up_receipt" '.receipt_code = 409 | .receipt = $r')"
+  export VERGING_IDEMPOTENCY_KEY="deploy-7 of acme"
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs accepts the input" 0 "$STEP_EXIT"
+  run_step run_release.sh;     check_exit "run_release exits 0 with the input" 0 "$STEP_EXIT"
+  check_eq "the release POST carries the input verbatim" "deploy-7 of acme" "$(posted_header 0 idempotency-key)"
+  check_eq "the wiring check POST carries the input with the :wiring suffix" "deploy-7 of acme:wiring" "$(posted_header 1 idempotency-key)"
+  check_grep "the log says the key came from the input" "Idempotency-Key from the idempotency_key input." "$CASE_TMP/run.log"
+
+  # 6. A value the API would refuse (over 255 characters) is sent as its
+  # SHA-256 digest, so the header always fits the API's rule.
+  set_scenario "$(happy_scenario "$rid")"
+  local long; long="$(printf 'k%.0s' $(seq 1 300))"
+  export VERGING_IDEMPOTENCY_KEY="$long"
+  run_step resolve_inputs.sh
+  run_step run_release.sh;     check_exit "run_release exits 0 with a long input" 0 "$STEP_EXIT"
+  check_eq "a key over 255 characters is sent as sha256:<digest>" "sha256:$(printf '%s' "$long" | sha256sum | cut -c1-64)" "$(posted_header 0 idempotency-key)"
+  check_eq "the digest key is 71 characters" "71" "$(posted_header 0 idempotency-key | tr -d '\n' | wc -c | tr -d ' ')"
+  unset VERGING_IDEMPOTENCY_KEY
+
+  # 7. Outside a GitHub job (no run id) no header is sent, and the log says so.
+  set_scenario "$(happy_scenario "$rid")"
+  run_step resolve_inputs.sh
+  ( unset GITHUB_RUN_ID; run_step run_release.sh; exit "$STEP_EXIT" ); check_exit "run_release exits 0 without a run id" 0 "$?"
+  check_eq "no Idempotency-Key header without GITHUB_RUN_ID" "null" "$(posted_header 0 idempotency-key)"
+  check_grep "the log says why no key is sent" "No Idempotency-Key is sent: GITHUB_REPOSITORY, GITHUB_SHA or GITHUB_RUN_ID is empty" "$CASE_TMP/run.log"
+
+  # 8. The same key with changed inputs: the API's 409 fails the job with the
+  # plain message, nothing else is submitted, no wiring check.
+  set_scenario "$(wiring_scenario "$wid" | jq '.receipt_code = 409 | .receipt = {error: "this Idempotency-Key was already used for a different release", fix: "an Idempotency-Key binds to the exact release it first accepted; send a NEW key for a changed submission, or resend the original submission unchanged to retry it"}')"
+  run_step run_release.sh;     check_exit "a reused key with changed inputs fails the job" 1 "$STEP_EXIT"
+  check_eq "nothing else was submitted (no wiring check)" "1" "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
+  check_grep "the error says the inputs changed for an already-submitted run" "::error::the workflow inputs changed for an already-submitted run: this workflow run already submitted the release under the Idempotency-Key $expected with different inputs" "$CASE_TMP/run.log"
+  check_grep "the error says what to do" "Push a new commit, or start a new workflow run, to submit the changed release." "$CASE_TMP/run.log"
+  check_grep "the API's own text is shown" "this Idempotency-Key was already used for a different release" "$CASE_TMP/run.log"
+  check_grep "the job summary says the release was not accepted" "release not accepted" "$GITHUB_STEP_SUMMARY"
+  check_no_grep "no notice" "::notice::" "$CASE_TMP/run.log"
   end_case
 }
 
@@ -1604,6 +1691,7 @@ case_fetch_only
 case_wiring_check_input
 case_not_set_up_fallback
 case_other_409_fails
+case_idempotency_key
 case_evidence_paths
 case_reconcile
 case_sync_mode

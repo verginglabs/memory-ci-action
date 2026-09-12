@@ -124,6 +124,14 @@ if [ "$wiring_check" = "true" ] && [ "$fallback" = "true" ]; then
   echo "fallback_pull_request is ignored during a wiring check: the page must land on the branch the job ran on, so a refused push fails the job and no pull request is opened."
 fi
 
+# idempotency_key: the Idempotency-Key the release is submitted under. Empty
+# (the default) means run_release.sh derives it from the GitHub run
+# (repository:sha:run_id), so a re-run of the same workflow run reuses the
+# release it already submitted instead of charging again. Stored as given;
+# run_release.sh fits it to the API's key rule (printable ASCII, at most 255
+# characters) by hashing anything longer or wider.
+state_set idempotency_key "${VERGING_IDEMPOTENCY_KEY:-}"
+
 timeout="${VERGING_POLL_TIMEOUT_MINUTES:-45}"
 if ! printf '%s' "$timeout" | grep -Eq '^[0-9]+$'; then
   echo "::error::poll_timeout_minutes '$timeout' is not a whole number of minutes"

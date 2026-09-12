@@ -108,24 +108,85 @@ if [ -n "$product_name" ]; then
 fi
 body="$(jq -cn "${args[@]}" "$filter")"
 
+# The Idempotency-Key header, the API's reuse contract: the same key with the
+# same request reuses the release it first accepted (HTTP 202 with the same
+# receipt, one release and one charge); the same key with a changed request
+# is refused with HTTP 409 before anything is billed; no key means every POST
+# is its own release and its own charge. The key names the GitHub workflow
+# run (repository:sha:run_id), so a "Re-run job" of the same run reuses the
+# release that run already submitted, while a new push (a new sha) or a new
+# workflow run (a new run id) is a new release. The idempotency_key input
+# replaces the derived value verbatim. The wiring check submits under the same
+# key with a ":wiring" suffix, so it never collides with the release. Outside
+# a GitHub job (one of the three variables empty) no header is sent.
+idempotency_key="$(state_get idempotency_key)"
+if [ -n "$idempotency_key" ]; then
+  echo "Idempotency-Key from the idempotency_key input."
+elif [ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "${GITHUB_SHA:-}" ] && [ -n "${GITHUB_RUN_ID:-}" ]; then
+  idempotency_key="${GITHUB_REPOSITORY}:${GITHUB_SHA}:${GITHUB_RUN_ID}"
+else
+  echo "No Idempotency-Key is sent: GITHUB_REPOSITORY, GITHUB_SHA or GITHUB_RUN_ID is empty (not a GitHub job) and the idempotency_key input is not set, so this submission is its own release and a repeat of it would be another."
+fi
+
+# idempotency_key_for SUFFIX: the key this POST sends (the key plus SUFFIX),
+# fitted to the API's rule for the header: printable ASCII, 1 to 255
+# characters. A longer or wider value is replaced by its SHA-256 digest, which
+# keeps the reuse property (the same value gives the same key) within the
+# limit. Prints nothing when no key is in force.
+idempotency_key_for() {
+  local key="$idempotency_key$1"
+  [ -n "$idempotency_key" ] || return 0
+  if [ "$(printf '%s' "$key" | wc -c)" -le 255 ] && [ "$(printf '%s' "$key" | LC_ALL=C tr -d ' -~' | wc -c)" -eq 0 ]; then
+    printf '%s' "$key"
+  else
+    printf 'sha256:%s' "$(printf '%s' "$key" | sha256sum | cut -c1-64)"
+  fi
+}
+
+# idempotency_key_reused FILE: true when the refusal body is the API's answer
+# to an Idempotency-Key reused with different parameters. The API names this
+# refusal in its error text only (it carries no code field), so the text is
+# matched; it is only consulted on an HTTP 409 sent with a key.
+idempotency_key_reused() {
+  jq -e . "$1" >/dev/null 2>&1 && jq -r '.error // ""' "$1" | grep -qi 'idempotency-key'
+}
+
+# report_key_reused KEY WHAT: the job's error when the API refused WHAT
+# ("the release" or "the wiring check") because KEY already submitted one
+# with different inputs. Nothing was billed for the refused submission.
+report_key_reused() {
+  echo "::error::the workflow inputs changed for an already-submitted run: this workflow run already submitted $2 under the Idempotency-Key $1 with different inputs (agent setups, suites, vendor_version or product_name), and the API refuses a changed submission under the same key before anything is billed. Push a new commit, or start a new workflow run, to submit the changed release. A re-run of this workflow run reuses $2 it already submitted only when nothing changed."
+}
+
 # submit_wiring_check BODY WHY: POST the same request with wiring_check: true,
 # then fetch its page and write it into the report folder like a report. WHY
 # is "input" (the wiring_check input) or "not_set_up" (the release was refused
 # because the suites are not set up yet); the surfaces and the closing notice
 # read it. A wiring check is served on delivery, so nothing is polled.
 submit_wiring_check() {
-  local body="$1" why="$2" wbody receipt code release_id release_date
+  local body="$1" why="$2" wbody receipt code release_id release_date key key_header
   wbody="$(printf '%s' "$body" | jq -c '. + {wiring_check: true}')"
   echo "POST $api_base/v1/releases (wiring check)"
   echo "Request body: $wbody"
+  key="$(idempotency_key_for ":wiring")"
+  key_header=()
+  if [ -n "$key" ]; then
+    echo "Idempotency-Key: $key"
+    key_header=(-H "Idempotency-Key: $key")
+  fi
   receipt="$(state_dir)/receipt.json"
   code="$(curl -sS -o "$receipt" -w '%{http_code}' \
     -X POST "$api_base/v1/releases" \
     -H "Authorization: Bearer ${VERGING_API_KEY:?VERGING_API_KEY is not set}" \
     -H "Content-Type: application/json" \
+    ${key_header[@]+"${key_header[@]}"} \
     -d "$wbody")" || code="000"
   if [ "$code" != "202" ]; then
-    echo "::error::POST /v1/releases (wiring check) returned HTTP $code (expected 202)"
+    if [ "$code" = "409" ] && [ -n "$key" ] && idempotency_key_reused "$receipt"; then
+      report_key_reused "$key" "the wiring check"
+    else
+      echo "::error::POST /v1/releases (wiring check) returned HTTP $code (expected 202)"
+    fi
     print_error_body "$receipt"
     {
       echo "## Verging Memory CI: wiring check not accepted"
@@ -179,12 +240,19 @@ fi
 
 echo "POST $api_base/v1/releases"
 echo "Request body: $body"
+key="$(idempotency_key_for "")"
+key_header=()
+if [ -n "$key" ]; then
+  echo "Idempotency-Key: $key (a re-run of this workflow run reuses the release this key first submitted instead of charging again)"
+  key_header=(-H "Idempotency-Key: $key")
+fi
 
 receipt="$(state_dir)/receipt.json"
 code="$(curl -sS -o "$receipt" -w '%{http_code}' \
   -X POST "$api_base/v1/releases" \
   -H "Authorization: Bearer ${VERGING_API_KEY:?VERGING_API_KEY is not set}" \
   -H "Content-Type: application/json" \
+  ${key_header[@]+"${key_header[@]}"} \
   -d "$body")" || code="000"
 
 if [ "$code" != "202" ]; then
@@ -205,7 +273,14 @@ if [ "$code" != "202" ]; then
     submit_wiring_check "$body" "not_set_up" || exit 1
     exit 0
   fi
-  echo "::error::POST /v1/releases returned HTTP $code (expected 202)"
+  # An HTTP 409 to a keyed submission whose inputs differ from the release
+  # this key first submitted: the API refuses it before billing, and the fix
+  # is a new commit or a new workflow run, never a retry of this one.
+  if [ "$code" = "409" ] && [ -n "$key" ] && idempotency_key_reused "$receipt"; then
+    report_key_reused "$key" "the release"
+  else
+    echo "::error::POST /v1/releases returned HTTP $code (expected 202)"
+  fi
   print_error_body "$receipt"
   {
     echo "## Verging Memory CI: release not accepted"
@@ -236,6 +311,9 @@ jq -r '
   "  status_url:     \(.status_url // "(not given)")",
   "  message:        \(.message // "(not given)")"
 ' "$receipt"
+if [ -n "$key" ]; then
+  echo "Submitted under Idempotency-Key $key: a re-run of this workflow run reuses release $release_id (the same receipt, no second charge) instead of submitting again."
+fi
 echo "If this job stops before the report is committed, the release stays on record as pending and the next job commits the report; to fetch it by hand, re-run with fetch_only_release_id=$release_id (nothing is submitted again)."
 
 release_date="$(jq -r '.received_at // empty' "$receipt" | cut -c1-10)"

@@ -197,13 +197,20 @@ write_release_dir() {
   return 0
 }
 
+# verdict_row_of REPORT_MD: the Release verdict from the header table row of
+# a committed REPORT.md, or empty when the row is missing.
+verdict_row_of() {
+  local verdict_row
+  verdict_row="$(grep -m1 'Release verdict' "$1" 2>/dev/null || true)"
+  printf '%s' "$verdict_row" \
+    | sed -E 's/\*\*//g; s/^[[:space:]]*\|?[[:space:]]*Release verdict[[:space:]]*[|:]?[[:space:]]*//; s/[[:space:]]*\|[[:space:]]*$//; s/[[:space:]]+$//'
+}
+
 # extract_verdict REPORT_JSON REPORT_MD: the Release verdict, from the header
 # table row in the markdown, else from diff.release_verdict.
 extract_verdict() {
-  local report="$1" md="$2" verdict_row verdict
-  verdict_row="$(grep -m1 'Release verdict' "$md" || true)"
-  verdict="$(printf '%s' "$verdict_row" \
-    | sed -E 's/\*\*//g; s/^[[:space:]]*\|?[[:space:]]*Release verdict[[:space:]]*[|:]?[[:space:]]*//; s/[[:space:]]*\|[[:space:]]*$//; s/[[:space:]]+$//')"
+  local report="$1" md="$2" verdict
+  verdict="$(verdict_row_of "$md")"
   if [ -z "$verdict" ]; then
     verdict="$(jq -r '.diff.release_verdict // "not recorded"' "$report")"
   fi
@@ -659,6 +666,188 @@ fetch_and_write_wiring() {
   return 0
 }
 
+# report_branch: the branch the report commit goes to: the pull request's
+# head branch, else the branch the job ran on, else the checked-out branch,
+# else main.
+report_branch() {
+  local branch="${GITHUB_HEAD_REF:-}"
+  [ -n "$branch" ] || branch="${GITHUB_REF_NAME:-}"
+  if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
+    branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  fi
+  [ -n "$branch" ] && [ "$branch" != "HEAD" ] || branch="main"
+  printf '%s' "$branch"
+}
+
+# fetch_branch BRANCH: bring origin/BRANCH up to date; true when it resolves
+# afterwards (false when there is no origin, or the branch is not on it).
+fetch_branch() {
+  git fetch -q origin "$1" >/dev/null 2>&1 || true
+  git rev-parse -q --verify "origin/$1^{commit}" >/dev/null 2>&1
+}
+
+# committed_release_id REF PATH: the release_id of the release.json at PATH
+# in REF, or empty.
+committed_release_id() {
+  git show "$1:$2" 2>/dev/null | jq -r '.release_id // empty' 2>/dev/null || true
+}
+
+# remote_report_dir FOLDER RELEASE_ID BRANCH: the release directory on
+# origin/BRANCH whose release.json carries RELEASE_ID (repository relative,
+# a report's or a wiring page's), "index" when only an index row names the
+# release (a release that failed on the Verging side has a row and no
+# directory), else empty. The directory this run wrote (the slug in the step
+# state) is tried first; the sweep covers a directory named differently.
+remote_report_dir() {
+  local folder="$1" id="$2" ref="origin/$3" slug path
+  git rev-parse -q --verify "$ref^{commit}" >/dev/null 2>&1 || return 0
+  slug="$(state_get slug)"
+  if [ -n "$slug" ] && [ "$(committed_release_id "$ref" "$folder/releases/$slug/release.json")" = "$id" ]; then
+    printf '%s' "$folder/releases/$slug"
+    return 0
+  fi
+  while IFS= read -r path; do
+    case "$path" in "$folder"/releases/*/release.json) ;; *) continue ;; esac
+    case "${path#"$folder/releases/"}" in */*/*) continue ;; esac
+    if [ "$(committed_release_id "$ref" "$path")" = "$id" ]; then
+      printf '%s' "$(dirname "$path")"
+      return 0
+    fi
+  done < <(git ls-tree -r --name-only "$ref" -- "$folder/releases" 2>/dev/null || true)
+  if git show "$ref:$folder/releases/index.md" 2>/dev/null | grep -qF -e "[$id](" -e "| $id |"; then
+    printf '%s' "index"
+  fi
+}
+
+rebase_in_progress() {
+  [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]
+}
+
+# rebase_on_branch BRANCH: rebase the report commit(s) on origin/BRANCH.
+# A conflict inside the report folder never fails the job: the branch's
+# version of every conflicting file is taken (an earlier attempt of this
+# workflow run, or a concurrent job, put the same files there first), and
+# what this job's commit brings that the branch lacks is put back (see
+# resolve_folder_conflicts). A commit with nothing left to bring is skipped.
+# A conflict outside the folder is not this action's to resolve: the rebase
+# is abandoned, as before, and the push loop reports the refusal. True when
+# the rebase completed.
+rebase_on_branch() {
+  local branch="$1" round
+  git rebase "origin/$branch" && return 0
+  for round in 1 2 3 4 5 6 7 8 9 10; do
+    rebase_in_progress || return 0
+    resolve_folder_conflicts "$branch" || break
+    if git diff --cached --quiet; then
+      echo "The branch already carries everything this commit brings; skipping it."
+      git rebase --skip && return 0
+    else
+      GIT_EDITOR=true git rebase --continue && return 0
+    fi
+  done
+  git rebase --abort 2>/dev/null || true
+  return 1
+}
+
+# resolve_folder_conflicts BRANCH: resolve the conflicts of the commit being
+# rebased when every one of them is inside the report folder; false when
+# one is outside it. The branch's version wins for every conflicting file
+# (for this job's own release that is the rule: an earlier attempt's copy
+# stands, ours is never rewritten over it); then the index rows of the other
+# releases this commit brings, the pending record's changes, and latest/
+# when this commit made this job's release the newest are put back.
+resolve_folder_conflicts() {
+  local branch="$1" folder id conflicts path index latest_conflict
+  folder="$(state_get folder)"
+  id="$(state_get release_id)"
+  conflicts="$(git diff --name-only --diff-filter=U)"
+  [ -n "$conflicts" ] || return 0
+  [ -n "$folder" ] || return 1
+  while IFS= read -r path; do
+    case "$path" in
+      "$folder"/*) ;;
+      *) echo "The rebase on origin/$branch conflicts outside the report folder ($path); not this action's to resolve."; return 1 ;;
+    esac
+  done <<< "$conflicts"
+  echo "The rebase on origin/$branch conflicts inside $folder; the branch's version of every conflicting file is taken:"
+  while IFS= read -r path; do
+    echo "  $path"
+    if git cat-file -e "HEAD:$path" 2>/dev/null; then
+      git checkout -q HEAD -- "$path" || return 1
+    else
+      git rm -q --cached -- "$path" 2>/dev/null || true
+      rm -f "$path"
+    fi
+  done <<< "$conflicts"
+  index="$folder/releases/index.md"
+  if printf '%s\n' "$conflicts" | grep -qxF -- "$index"; then
+    put_back_index_rows "$folder" "$id" "$branch"
+  fi
+  if printf '%s\n' "$conflicts" | grep -qxF -- "$(pending_path "$folder")"; then
+    put_back_pending_record "$folder"
+  fi
+  latest_conflict=0
+  while IFS= read -r path; do
+    case "$path" in "$folder"/latest/*) latest_conflict=1 ;; esac
+  done <<< "$conflicts"
+  if [ "$latest_conflict" = "1" ] \
+      && [ -n "$id" ] && [ "$(committed_release_id REBASE_HEAD "$folder/latest/release.json")" = "$id" ] \
+      && [ -z "$(remote_report_dir "$folder" "$id" "$branch")" ] \
+      && [ -f "$folder/releases/$(state_get slug)/release.json" ]; then
+    echo "  latest/ is refreshed from this job's release, the newest on record"
+    refresh_latest "$folder" "$folder/releases/$(state_get slug)"
+  fi
+  git add -A -- "$folder"
+}
+
+# put_back_index_rows FOLDER OWN_ID BRANCH: after the branch's index was
+# taken, the rows the rebased commit carries that the branch's index lacks
+# are put back, keyed by release id, except the row of this job's own
+# release when the branch already carries that release: its row stays as
+# the branch has it.
+put_back_index_rows() {
+  local folder="$1" own="$2" branch="$3" index row rid
+  index="$folder/releases/index.md"
+  git cat-file -e "REBASE_HEAD:$index" 2>/dev/null || return 0
+  while IFS= read -r row; do
+    case "$row" in "| "[0-9]*) ;; *) continue ;; esac
+    grep -qxF -- "$row" "$index" 2>/dev/null && continue
+    rid="$(printf '%s' "$row" | awk -F'|' '{gsub(/^ +| +$/, "", $4); print $4}' | sed -E 's/^\[([^]]*)\].*$/\1/')"
+    [ -n "$rid" ] || continue
+    if [ "$rid" = "$own" ] && [ -n "$(remote_report_dir "$folder" "$rid" "$branch")" ]; then
+      echo "  the index row for $rid stays as the branch has it"
+      continue
+    fi
+    echo "  the index row for $rid is put back"
+    index_put_row "$folder" "$rid" "$row"
+  done < <(git show "REBASE_HEAD:$index")
+}
+
+# put_back_pending_record FOLDER: after the branch's pending record was
+# taken, the changes the rebased commit made to it (entries added or
+# brought up to date, entries cleared) are applied to the branch's version.
+put_back_pending_record() {
+  local folder="$1" f base mine theirs tmp
+  f="$(pending_path "$folder")"
+  base="$(git show "REBASE_HEAD^:$f" 2>/dev/null || true)"
+  mine="$(git show "REBASE_HEAD:$f" 2>/dev/null || true)"
+  theirs="$(git show "HEAD:$f" 2>/dev/null || true)"
+  printf '%s' "$base" | jq -e 'type == "object"' >/dev/null 2>&1 || base='{}'
+  printf '%s' "$mine" | jq -e 'type == "object"' >/dev/null 2>&1 || mine='{}'
+  printf '%s' "$theirs" | jq -e 'type == "object"' >/dev/null 2>&1 || theirs='{}'
+  tmp="$(state_dir)/pending.tmp"
+  jq -n --argjson base "$base" --argjson mine "$mine" --argjson theirs "$theirs" '
+    reduce (($base | keys) - ($mine | keys))[] as $k ($theirs; del(.[$k]))
+    | reduce (($mine | keys)[] | select($mine[.] != $base[.])) as $k (.; .[$k] = $mine[$k])' > "$tmp" || return 0
+  if [ "$(jq 'length' "$tmp")" = "0" ]; then
+    rm -f "$f"
+  else
+    mkdir -p "$folder/releases"
+    mv "$tmp" "$f"
+  fi
+  echo "  the pending record carries the branch's entries plus this commit's changes"
+}
+
 # push_report_commit: push HEAD to the branch this job ran on, with a fetch
 # and rebase retry. When the push is still refused the job FAILS with a named
 # error that says which branch refused it and what to allow (the workflow's
@@ -669,14 +858,15 @@ fetch_and_write_wiring() {
 # pull request into the default branch, and the job stays green.
 push_report_commit() {
   local branch attempt
-  branch="${GITHUB_HEAD_REF:-}"
-  [ -n "$branch" ] || branch="${GITHUB_REF_NAME:-}"
-  if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
-    branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-  fi
-  [ -n "$branch" ] && [ "$branch" != "HEAD" ] || branch="main"
+  branch="$(report_branch)"
 
   for attempt in 1 2 3; do
+    if [ "$attempt" != "1" ] && [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$branch" 2>/dev/null)" ]; then
+      echo "The branch $branch already carries this job's report commit; nothing to push."
+      state_set pushed_ref "$branch"
+      state_set push_path "already-committed"
+      return 0
+    fi
     if git push origin "HEAD:$branch"; then
       echo "Report commit pushed to $branch."
       state_set pushed_ref "$branch"
@@ -685,7 +875,7 @@ push_report_commit() {
     fi
     echo "Push attempt $attempt to $branch failed; fetching and rebasing on origin/$branch."
     git fetch origin "$branch" || true
-    git rebase "origin/$branch" || { git rebase --abort 2>/dev/null || true; }
+    rebase_on_branch "$branch" || true
   done
 
   if fallback_pull_request_wanted; then

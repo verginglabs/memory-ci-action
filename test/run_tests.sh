@@ -243,6 +243,10 @@ case_happy_path() {
   else
     note_fail "folder README does not match the template"
   fi
+  check_no_grep "the customer Action README names no internal generator" "radar-memory-harness" "$ROOT/README.md"
+  check_no_grep "the customer Action README names no internal source path" "scripts/sync-action-readme.mjs" "$ROOT/README.md"
+  local forbidden_setup_label="Cla"; forbidden_setup_label="${forbidden_setup_label}ude Code Opus 5"
+  check_no_grep "the copied folder README carries no setup vendor label" "$forbidden_setup_label" "$WORKSPACE/$FOLDER/README.md"
   check_dirs_equal "latest/ is a full copy of the release directory" "$dir" "$WORKSPACE/$FOLDER/latest"
   check_eq "release.json holds the four fields" \
     "$rid 2.31.0 2026-08-18" \

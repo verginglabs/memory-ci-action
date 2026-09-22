@@ -243,12 +243,33 @@ verdict_cell() {
   fi
 }
 
+# existing_slug_for FOLDER RELEASE_ID: print the existing report directory for
+# this release id, if there is one. Receipt timestamps are optional, so a
+# later rerun must retain the directory the release already owns.
+existing_slug_for() {
+  local folder="$1" release_id="$2" dir
+  [ -d "$folder/releases" ] || return 1
+  while IFS= read -r -d '' dir; do
+    if [ "$(jq -r '.release_id // empty' "$dir/release.json" 2>/dev/null)" = "$release_id" ]; then
+      printf '%s' "${dir##*/}"
+      return 0
+    fi
+  done < <(find "$folder/releases" -mindepth 1 -maxdepth 1 -type d -print0)
+  return 1
+}
+
 # slug_for RELEASE_DATE VENDOR_VERSION RELEASE_ID FOLDER: the release
 # directory name. Folders are named by the release (its date and version),
 # not by the internal id; the id lives in release.json and the index. A
-# same-day resubmission of the same version gets the id's short stem appended.
+# later rerun always reuses the release id's directory, even when the receipt has
+# no timestamp and the current UTC date has changed.
 slug_for() {
-  local slug="$1-$2" dir="$4/releases/$1-$2"
+  local slug="$1-$2" dir="$4/releases/$1-$2" existing
+  existing="$(existing_slug_for "$4" "$3" || true)"
+  if [ -n "$existing" ]; then
+    printf '%s' "$existing"
+    return 0
+  fi
   if [ -d "$dir" ] && [ "$(jq -r '.release_id // empty' "$dir/release.json" 2>/dev/null)" != "$3" ]; then
     slug="$slug-$(printf '%s' "$3" | tail -c 12)"
   fi
@@ -589,10 +610,15 @@ fetch_and_write() {
 # wiring_slug_for RELEASE_DATE VENDOR_VERSION RELEASE_ID FOLDER: the wiring
 # page's directory name: the release slug with "-wiring-check" appended, so a
 # real release of the same version on the same day keeps its own directory.
-# A same-day repeat of the wiring check for the same version gets the id's
-# short stem appended, exactly as slug_for does.
+# A later rerun always reuses its release id's directory, even when its receipt has
+# no timestamp and the current UTC date has changed.
 wiring_slug_for() {
-  local slug="$1-$2-wiring-check" dir="$4/releases/$1-$2-wiring-check"
+  local slug="$1-$2-wiring-check" dir="$4/releases/$1-$2-wiring-check" existing
+  existing="$(existing_slug_for "$4" "$3" || true)"
+  if [ -n "$existing" ]; then
+    printf '%s' "$existing"
+    return 0
+  fi
   if [ -d "$dir" ] && [ "$(jq -r '.release_id // empty' "$dir/release.json" 2>/dev/null)" != "$3" ]; then
     slug="$slug-$(printf '%s' "$3" | tail -c 12)"
   fi

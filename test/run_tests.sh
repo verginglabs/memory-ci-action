@@ -6,6 +6,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TESTDIR="$ROOT/test"
+REAL_DATE="$(command -v date)"
 WORK_BASE="$(mktemp -d)"
 PASS=0
 FAIL=0
@@ -112,6 +113,17 @@ stop_mock() {
 }
 
 setup_env() {
+  export VERGING_REAL_DATE="$REAL_DATE"
+  mkdir -p "$CASE_TMP/bin"
+  printf '%s\n' '#!/bin/sh' \
+    'if [ "$1" = "-u" ] && [ "$2" = "+%Y-%m-%d" ] && [ -n "$VERGING_TEST_UTC_DAY" ]; then' \
+    '  printf "%s\\n" "$VERGING_TEST_UTC_DAY"' \
+    '  exit 0' \
+    'fi' \
+    'exec "$VERGING_REAL_DATE" "$@"' > "$CASE_TMP/bin/date"
+  chmod +x "$CASE_TMP/bin/date"
+  export PATH="$CASE_TMP/bin:$PATH"
+  unset VERGING_TEST_UTC_DAY
   export RUNNER_TEMP="$CASE_TMP/runner"
   mkdir -p "$RUNNER_TEMP"
   export GITHUB_OUTPUT="$CASE_TMP/github_output"
@@ -243,8 +255,8 @@ case_happy_path() {
   else
     note_fail "folder README does not match the template"
   fi
-  check_no_grep "the customer Action README names no internal generator" "radar-memory-harness" "$ROOT/README.md"
-  check_no_grep "the customer Action README names no internal source path" "scripts/sync-action-readme.mjs" "$ROOT/README.md"
+  check_no_grep "the copied folder README names no internal generator" "radar-memory-harness" "$WORKSPACE/$FOLDER/README.md"
+  check_no_grep "the copied folder README names no internal source path" "scripts/sync-action-readme.mjs" "$WORKSPACE/$FOLDER/README.md"
   local forbidden_setup_label="Cla"; forbidden_setup_label="${forbidden_setup_label}ude Code Opus 5"
   check_no_grep "the copied folder README carries no setup vendor label" "$forbidden_setup_label" "$WORKSPACE/$FOLDER/README.md"
   check_dirs_equal "latest/ is a full copy of the release directory" "$dir" "$WORKSPACE/$FOLDER/latest"
@@ -406,13 +418,14 @@ case_held() {
 }
 
 case_activation_id() {
-  begin_case "activation id passes through, a workflow re-run returns its original release, and its report lands in the folder"
+  begin_case "activation id passes through, and a timestamp-free workflow re-run on a later day keeps one report directory"
   local rid="run_20260922_activation"
   local activation="act_6kxjg3n"
-  start_mock "$(happy_scenario "$rid")" || { end_case; return; }
+  start_mock "$(happy_scenario "$rid" | jq 'del(.receipt.received_at)')" || { end_case; return; }
   setup_env
   make_repos
   export VERGING_ACTIVATION_ID="$activation"
+  export VERGING_TEST_UTC_DAY="2026-09-21"
 
   run_step resolve_inputs.sh; check_exit "resolve_inputs accepts activation_id" 0 "$STEP_EXIT"
   run_step reconcile.sh; run_step run_release.sh; check_exit "first activation submission completes" 0 "$STEP_EXIT"
@@ -422,7 +435,7 @@ case_activation_id() {
   check_eq "activation id is present in the first request body" "$activation" "$(posted_body | jq -r '.activation_id')"
   check_match "the idempotency key has exactly its three required parts" '^verging-memory-ci:[^:]+:[^:]+$' "$first_key"
   check_eq "the idempotency key uses this run id and job" "verging-memory-ci:${GITHUB_RUN_ID}:${GITHUB_JOB}" "$first_key"
-  check_file "the activation report is written like a release" "$WORKSPACE/$FOLDER/releases/2026-08-15-2.31.0/REPORT.md"
+  check_file "the activation report uses the first timestamp-free run's day" "$WORKSPACE/$FOLDER/releases/2026-09-21-2.31.0/REPORT.md"
 
   local other_receipt other_id
   other_receipt="$CASE_TMP/other-key-receipt.json"
@@ -434,12 +447,14 @@ case_activation_id() {
   # A GitHub re-run changes GITHUB_RUN_ATTEMPT but is the same workflow run
   # and job. The intake returns the original receipt for this same key.
   export GITHUB_RUN_ATTEMPT="2"
+  export VERGING_TEST_UTC_DAY="2026-09-22"
   run_step resolve_inputs.sh; run_step reconcile.sh; run_step run_release.sh; check_exit "the workflow re-run completes" 0 "$STEP_EXIT"
   local second_key
   second_key="$(jq -rs '[.[] | select(.method == "POST")][-1].headers["idempotency-key"]' "$MOCK_DIR/requests.log")"
   check_eq "the workflow re-run keeps the same idempotency key" "$first_key" "$second_key"
   check_eq "the workflow re-run receives the original release" "$rid" "$(cat "$RUNNER_TEMP/verging-memory-ci-state/release_id")"
   check_eq "the workflow re-run writes no second report" "$first_reports" "$(find "$WORKSPACE/$FOLDER/releases" -name REPORT.md | wc -l | tr -d ' ')"
+  check_no_path "the later day owns no second directory for this release" "$WORKSPACE/$FOLDER/releases/2026-09-22-2.31.0"
   end_case
 }
 
@@ -634,6 +649,31 @@ case_wiring_check_input() {
   end_case
 }
 
+case_wiring_timestamp_free_rerun() {
+  begin_case "a timestamp-free wiring re-run on a later day keeps one page directory"
+  local wid="run_20260922_wiring"
+  start_mock "$(wiring_scenario "$wid" | jq 'del(.wiring_receipt.received_at) | .receipt_code = 400 | .receipt = {error: "the test expected a wiring check, not a release", fix: "-"}')" || { end_case; return; }
+  setup_env
+  make_repos
+  export VERGING_WIRING_CHECK="true"
+  export VERGING_TEST_UTC_DAY="2026-09-21"
+
+  run_step resolve_inputs.sh; run_step reconcile.sh; run_step run_release.sh
+  check_exit "the first timestamp-free wiring check completes" 0 "$STEP_EXIT"
+  check_file "the first timestamp-free wiring page is written" "$WORKSPACE/$FOLDER/releases/2026-09-21-2.31.0-wiring-check/REPORT.md"
+  local first_pages
+  first_pages="$(find "$WORKSPACE/$FOLDER/releases" -name REPORT.md | wc -l | tr -d ' ')"
+
+  export GITHUB_RUN_ATTEMPT="2"
+  export VERGING_TEST_UTC_DAY="2026-09-22"
+  run_step resolve_inputs.sh; run_step reconcile.sh; run_step run_release.sh
+  check_exit "the later-day timestamp-free wiring re-run completes" 0 "$STEP_EXIT"
+  check_eq "the wiring re-run writes no second page" "$first_pages" "$(find "$WORKSPACE/$FOLDER/releases" -name REPORT.md | wc -l | tr -d ' ')"
+  check_no_path "the later day owns no second directory for this wiring page" "$WORKSPACE/$FOLDER/releases/2026-09-22-2.31.0-wiring-check"
+  unset VERGING_WIRING_CHECK
+  end_case
+}
+
 case_not_set_up_fallback() {
   begin_case "a 409 with code not_set_up turns the release into a wiring check: green job, page committed, notice emitted"
   local wid="run_20260825_0a1b2c3d4e5f"
@@ -660,7 +700,7 @@ case_not_set_up_fallback() {
   check_eq "the first request is the release (no wiring_check field)" "null" "$(printf '%s' "$first" | jq -r '.wiring_check')"
   check_eq "the second request is the wiring check" "true" "$(printf '%s' "$second" | jq -r '.wiring_check')"
   check_eq "the release is the only request that carries the new activation id" '["act_first_push"]' "$(jq -c -rs '[.[] | select(.method == "POST") | .body | fromjson | .activation_id | select(.)]' "$MOCK_DIR/requests.log")"
-  check_eq "the wiring check carries the release fields except activation_id" "$(printf '%s' "$first" | jq -c 'del(.activation_id)')" "$(printf '%s' "$second" | jq -c 'del(.wiring_check, .activation_id)')"
+  check_eq "the wiring check itself omits activation_id" "$(printf '%s' "$first" | jq -c 'del(.activation_id)')" "$(printf '%s' "$second" | jq -c 'del(.wiring_check)')"
   check_grep "the log states the refusal by its code" "POST /v1/releases returned HTTP 409 with code not_set_up" "$CASE_TMP/run.log"
   check_grep "the refusal's own text is shown" "Core Recall on staging-mcp is not set up yet" "$CASE_TMP/run.log"
   check_grep "the exact notice is emitted" "$WIRING_NOTICE" "$CASE_TMP/run.log"
@@ -1677,6 +1717,7 @@ case_activation_refusal
 case_failed
 case_fetch_only
 case_wiring_check_input
+case_wiring_timestamp_free_rerun
 case_not_set_up_fallback
 case_other_409_fails
 case_evidence_paths

@@ -55,7 +55,7 @@ def bump(name):
     return n
 
 
-def idempotent_release(scenario, key):
+def idempotent_release(scenario, key, receipt_name="receipt", code_name="receipt_code"):
     """Return the response bound to KEY, creating a distinct release for new keys."""
     path = os.path.join(MOCK_DIR, "idempotency.json")
     if os.path.exists(path):
@@ -63,17 +63,20 @@ def idempotent_release(scenario, key):
             replies = json.load(f)
     else:
         replies = {}
-    if key in replies:
-        return replies[key]["code"], replies[key]["body"]
+    map_key = receipt_name + ":" + key
+    if map_key in replies:
+        return replies[map_key]["code"], replies[map_key]["body"]
 
-    body = scenario["receipt"]
-    if replies and "release_id" in body:
+    body = scenario[receipt_name]
+    same_kind_count = sum(1 for prior_key in replies
+                          if prior_key.startswith(receipt_name + ":"))
+    if same_kind_count and "release_id" in body:
         body = dict(body)
-        body["release_id"] = body["release_id"] + "-new-" + str(len(replies) + 1)
+        body["release_id"] = body["release_id"] + "-new-" + str(same_kind_count + 1)
         if "status_url" in body:
             body["status_url"] = "/v1/releases/" + body["release_id"]
-    reply = {"code": scenario.get("receipt_code", 202), "body": body}
-    replies[key] = reply
+    reply = {"code": scenario.get(code_name, 202), "body": body}
+    replies[map_key] = reply
     with open(path, "w") as f:
         json.dump(replies, f)
     return reply["code"], reply["body"]
@@ -108,7 +111,10 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, AttributeError):
                 wiring = False
             if wiring and "wiring_receipt" in sc:
-                self._send(sc.get("wiring_receipt_code", 202), sc["wiring_receipt"])
+                code, response = idempotent_release(
+                    sc, self.headers.get("Idempotency-Key") or "",
+                    "wiring_receipt", "wiring_receipt_code")
+                self._send(code, response)
             else:
                 code, response = idempotent_release(sc, self.headers.get("Idempotency-Key") or "")
                 self._send(code, response)

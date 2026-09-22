@@ -429,13 +429,27 @@ case_activation_id() {
 
   run_step resolve_inputs.sh; check_exit "resolve_inputs accepts activation_id" 0 "$STEP_EXIT"
   run_step reconcile.sh; run_step run_release.sh; check_exit "first activation submission completes" 0 "$STEP_EXIT"
-  local first_key first_reports
+  local first_key first_reports newer_id newer_dir index
   first_key="$(jq -rs '[.[] | select(.method == "POST")][0].headers["idempotency-key"]' "$MOCK_DIR/requests.log")"
   first_reports="$(find "$WORKSPACE/$FOLDER/releases" -name REPORT.md | wc -l | tr -d ' ')"
   check_eq "activation id is present in the first request body" "$activation" "$(posted_body | jq -r '.activation_id')"
   check_match "the idempotency key has exactly its three required parts" '^verging-memory-ci:[^:]+:[^:]+$' "$first_key"
   check_eq "the idempotency key uses this run id and job" "verging-memory-ci:${GITHUB_RUN_ID}:${GITHUB_JOB}" "$first_key"
   check_file "the activation report uses the first timestamp-free run's day" "$WORKSPACE/$FOLDER/releases/2026-09-21-2.31.0/REPORT.md"
+
+  # Model a newer report already committed by Tuesday.  Re-running Monday's
+  # idempotent receipt must retain both Monday's index date and Tuesday's
+  # customer-facing latest/ report.
+  newer_id="${rid}-newer"
+  newer_dir="$WORKSPACE/$FOLDER/releases/2026-09-22-2.32.0"
+  cp -R "$WORKSPACE/$FOLDER/releases/2026-09-21-2.31.0" "$newer_dir"
+  jq --arg rid "$newer_id" '.release_id = $rid | .vendor_version = "2.32.0"' \
+    "$newer_dir/release.json" > "$newer_dir/release.json.tmp" && mv "$newer_dir/release.json.tmp" "$newer_dir/release.json"
+  rm -rf "$WORKSPACE/$FOLDER/latest"
+  cp -R "$newer_dir" "$WORKSPACE/$FOLDER/latest"
+  index="$WORKSPACE/$FOLDER/releases/index.md"
+  printf '| 2026-09-22 | 2.32.0 | [%s](2026-09-22-2.32.0/REPORT.md) | Ready | final |\n' "$newer_id" >> "$index"
+  first_reports="$(find "$WORKSPACE/$FOLDER/releases" -name REPORT.md | wc -l | tr -d ' ')"
 
   local other_receipt other_id
   other_receipt="$CASE_TMP/other-key-receipt.json"
@@ -455,6 +469,8 @@ case_activation_id() {
   check_eq "the workflow re-run receives the original release" "$rid" "$(cat "$RUNNER_TEMP/verging-memory-ci-state/release_id")"
   check_eq "the workflow re-run writes no second report" "$first_reports" "$(find "$WORKSPACE/$FOLDER/releases" -name REPORT.md | wc -l | tr -d ' ')"
   check_no_path "the later day owns no second directory for this release" "$WORKSPACE/$FOLDER/releases/2026-09-22-2.31.0"
+  check_grep "the repeat run keeps the index date aligned with its directory" "| 2026-09-21 | 2.31.0 | [$rid](2026-09-21-2.31.0/REPORT.md)" "$index"
+  check_eq "the repeat run leaves latest with the newer release" "$newer_id" "$(jq -r '.release_id' "$WORKSPACE/$FOLDER/latest/release.json")"
   end_case
 }
 
@@ -661,15 +677,26 @@ case_wiring_timestamp_free_rerun() {
   run_step resolve_inputs.sh; run_step reconcile.sh; run_step run_release.sh
   check_exit "the first timestamp-free wiring check completes" 0 "$STEP_EXIT"
   check_file "the first timestamp-free wiring page is written" "$WORKSPACE/$FOLDER/releases/2026-09-21-2.31.0-wiring-check/REPORT.md"
-  local first_pages
+  local first_pages first_key second_key
   first_pages="$(find "$WORKSPACE/$FOLDER/releases" -name REPORT.md | wc -l | tr -d ' ')"
+  first_key="$(jq -rs '[.[] | select(.method == "POST")][0].headers["idempotency-key"]' "$MOCK_DIR/requests.log")"
+  local changed_key_receipt changed_key_id
+  changed_key_receipt="$CASE_TMP/changed-wiring-key.json"
+  curl -sS -o "$changed_key_receipt" -X POST "$VERGING_API_BASE/v1/releases" \
+    -H "Content-Type: application/json" -H "Idempotency-Key: ${first_key}:changed" \
+    -d "$(posted_body)"
+  changed_key_id="$(jq -r '.release_id' "$changed_key_receipt")"
+  check_ne "the mock gives a changed wiring key a distinct receipt" "$wid" "$changed_key_id"
 
   export GITHUB_RUN_ATTEMPT="2"
   export VERGING_TEST_UTC_DAY="2026-09-22"
   run_step resolve_inputs.sh; run_step reconcile.sh; run_step run_release.sh
   check_exit "the later-day timestamp-free wiring re-run completes" 0 "$STEP_EXIT"
+  second_key="$(jq -rs '[.[] | select(.method == "POST")][-1].headers["idempotency-key"]' "$MOCK_DIR/requests.log")"
+  check_eq "the wiring re-run keeps the same idempotency key" "$first_key" "$second_key"
   check_eq "the wiring re-run writes no second page" "$first_pages" "$(find "$WORKSPACE/$FOLDER/releases" -name REPORT.md | wc -l | tr -d ' ')"
   check_no_path "the later day owns no second directory for this wiring page" "$WORKSPACE/$FOLDER/releases/2026-09-22-2.31.0-wiring-check"
+  check_grep "the wiring repeat run keeps the index date aligned with its directory" "| 2026-09-21 | 2.31.0 | [$wid](2026-09-21-2.31.0-wiring-check/REPORT.md)" "$WORKSPACE/$FOLDER/releases/index.md"
   unset VERGING_WIRING_CHECK
   end_case
 }

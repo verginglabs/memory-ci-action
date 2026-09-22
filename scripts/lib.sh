@@ -276,6 +276,17 @@ slug_for() {
   printf '%s' "$slug"
 }
 
+# date_for_slug SLUG FALLBACK_DATE: a release directory is the durable record
+# of its UTC date.  A receipt is allowed to omit received_at, so a later
+# workflow re-run must use the date already encoded in that directory.
+date_for_slug() {
+  if [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}- ]]; then
+    printf '%s' "${1:0:10}"
+  else
+    printf '%s' "$2"
+  fi
+}
+
 ensure_index() {
   local index="$1/releases/index.md"
   mkdir -p "$1/releases"
@@ -541,7 +552,7 @@ poll_release() {
 # when a newer release's report is already on record.
 fetch_and_write() {
   local id="$1" release_date="$2" latest_mode="${3:-}"
-  local folder report code vendor_version slug dir verdict stage rstatus due first_report
+  local folder report code vendor_version slug dir verdict stage rstatus due first_report existing latest_id
   folder="$(state_get folder)"
   report="$(state_dir)/report.json"
   code="$(api_get "/v1/releases/$id/report" "$report")"
@@ -555,10 +566,13 @@ fetch_and_write() {
   [ -n "$vendor_version" ] || vendor_version="$(state_get vendor_version)"
   [ -n "$vendor_version" ] || vendor_version="not-recorded"
 
+  existing="$(existing_slug_for "$folder" "$id" || true)"
   slug="$(slug_for "$release_date" "$vendor_version" "$id" "$folder")"
+  release_date="$(date_for_slug "$slug" "$release_date")"
   dir="$folder/releases/$slug"
   write_release_dir "$report" "$dir" || return 1
-  if [ "$latest_mode" = "keep-latest" ]; then
+  latest_id="$(jq -r '.release_id // empty' "$folder/latest/release.json" 2>/dev/null || true)"
+  if [ "$latest_mode" = "keep-latest" ] || { [ -n "$existing" ] && [ -n "$latest_id" ] && [ "$latest_id" != "$id" ]; }; then
     echo "latest/ left as it is: a newer release's report is already on record."
   else
     refresh_latest "$folder" "$dir"
@@ -653,6 +667,7 @@ fetch_and_write_wiring() {
   [ -n "$vendor_version" ] || vendor_version="not-recorded"
 
   slug="$(wiring_slug_for "$release_date" "$vendor_version" "$id" "$folder")"
+  release_date="$(date_for_slug "$slug" "$release_date")"
   dir="$folder/releases/$slug"
   write_release_dir "$report" "$dir" || return 1
   ensure_folder_readme "$folder"

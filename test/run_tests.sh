@@ -1789,6 +1789,78 @@ case_fetch_only_older_does_not_replace_latest() {
   end_case
 }
 
+case_same_day_later_pending_replaces_latest() {
+  begin_case "a later same-second pending receipt replaces latest/ (fractional seconds are instants, not text)"
+  local old="run_20260922_111122223333" later="run_20260922_444455556666" later_md scenario
+  later_md="$(make_report_md "Larkspur 2.43.0" "Ready" "Preliminary report")"
+  scenario="$(jq -n --arg later "$later" --arg later_md "$later_md" '{
+    status_by_id: {($later): [{release_id: $later, status: "report_ready", received_at: "2026-09-22T18:00:00.500Z"}]},
+    report_by_id: {($later): {release_id: $later, status: "report_ready", vendor_version: "2.43.0", scope: {suites: ["core-recall"]}, corrections_due_by: "-", report_markdown: $later_md, diff: {format: "release-diff/v1", release_id: $later, release_verdict: "ready", stage: "preliminary"}, evidence: []}}
+  }')"
+  start_mock "$scenario" || { end_case; return; }
+  setup_env
+  make_repos
+  seed_reported_release "$old" "2.42.0" "2026-09-22T18:00:00Z"
+  seed_pending_release "$later" "2.43.0" "2026-09-22T18:00:00.500Z"
+  unset VERGING_AGENT_SETUPS
+  export VERGING_MODE="sync"
+  run_step resolve_inputs.sh; check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh; check_exit "reconcile exits 0" 0 "$STEP_EXIT"
+  check_eq "the later same-day receipt moves latest/" "$later" "$(jq -r '.release_id' "$WORKSPACE/$FOLDER/latest/release.json")"
+  check_eq "latest/diff.json belongs to the later tree" "$later" "$(jq -r '.release_id' "$WORKSPACE/$FOLDER/latest/diff.json")"
+  end_case
+}
+
+case_timestamp_free_fetch_then_later_pending_replaces_latest() {
+  begin_case "a timestamp-free fetch-only report yields latest/ to a later same-day pending report"
+  local missing="run_20260922_777788889999" later="run_20260922_aaaabbbb9999" missing_md later_md scenario
+  missing_md="$(make_report_md "Larkspur 2.44.0" "Ready" "Final report")"
+  later_md="$(make_report_md "Larkspur 2.45.0" "Not ready: 1 accuracy failure" "Preliminary report")"
+  scenario="$(jq -n --arg missing "$missing" --arg missing_md "$missing_md" '{
+    status_by_id: {($missing): [{release_id: $missing, status: "corrected"}]},
+    report_by_id: {($missing): {release_id: $missing, status: "corrected", vendor_version: "2.44.0", scope: {suites: ["core-recall"]}, corrections_due_by: "-", report_markdown: $missing_md, diff: {format: "release-diff/v1", release_id: $missing, release_verdict: "ready", stage: "final"}, evidence: []}}
+  }')"
+  start_mock "$scenario" || { end_case; return; }
+  setup_env
+  make_repos
+  export VERGING_FETCH_ONLY_RELEASE_ID="$missing"
+  run_step resolve_inputs.sh; run_step reconcile.sh; run_step run_release.sh; check_exit "timestamp-free fetch-only exits 0" 0 "$STEP_EXIT"
+  check_eq "the fetched report has no receipt time" "" "$(jq -r '.received_at // empty' "$WORKSPACE/$FOLDER/latest/release.json")"
+  unset VERGING_FETCH_ONLY_RELEASE_ID
+  scenario="$(jq -n --arg later "$later" --arg later_md "$later_md" '{
+    status_by_id: {($later): [{release_id: $later, status: "report_ready", received_at: "2026-09-22T18:00:00.000Z"}]},
+    report_by_id: {($later): {release_id: $later, status: "report_ready", vendor_version: "2.45.0", scope: {suites: ["core-recall"]}, corrections_due_by: "-", report_markdown: $later_md, diff: {format: "release-diff/v1", release_id: $later, release_verdict: "not_ready", stage: "preliminary"}, evidence: []}}
+  }')"
+  set_scenario "$scenario"
+  seed_pending_release "$later" "2.45.0" "2026-09-22T18:00:00.000Z"
+  export VERGING_MODE="sync"
+  run_step resolve_inputs.sh; run_step reconcile.sh; check_exit "later pending reconciliation exits 0" 0 "$STEP_EXIT"
+  check_eq "the later receipt replaces the timestamp-free latest/" "$later" "$(jq -r '.release_id' "$WORKSPACE/$FOLDER/latest/release.json")"
+  check_eq "latest/diff.json changes to the distinct later tree" "not_ready" "$(jq -r '.release_verdict' "$WORKSPACE/$FOLDER/latest/diff.json")"
+  end_case
+}
+
+case_final_rewrite_replaces_older_latest() {
+  begin_case "a final rewrite moves latest/ onto its newer same-day report"
+  local old="run_20260922_ccccddee0000" final="run_20260922_ddddeeee1111" final_md scenario final_dir
+  final_md="$(make_report_md "Larkspur 2.47.0" "Ready" "Final report")"
+  scenario="$(jq -n --arg final "$final" --arg final_md "$final_md" '{report_by_id: {($final): {release_id: $final, vendor_version: "2.47.0", scope: {suites: ["core-recall"]}, corrections_due_by: "-", report_markdown: $final_md, diff: {format: "release-diff/v1", release_id: $final, release_verdict: "ready", stage: "final"}, evidence: []}}}')"
+  start_mock "$scenario" || { end_case; return; }
+  setup_env
+  make_repos
+  seed_reported_release "$old" "2.46.0" "2026-09-22T09:00:00.000Z"
+  final_dir="$WORKSPACE/$FOLDER/releases/2026-09-22-2.47.0"
+  cp -R "$WORKSPACE/$FOLDER/releases/2026-09-22-2.46.0" "$final_dir"
+  jq --arg id "$final" --arg at "2026-09-22T18:00:00.000Z" '.release_id = $id | .vendor_version = "2.47.0" | .received_at = $at' "$final_dir/release.json" > "$final_dir/release.json.tmp" && mv "$final_dir/release.json.tmp" "$final_dir/release.json"
+  jq --arg id "$final" '.release_id = $id | .stage = "preliminary"' "$final_dir/diff.json" > "$final_dir/diff.json.tmp" && mv "$final_dir/diff.json.tmp" "$final_dir/diff.json"
+  printf '| 2026-09-22 | 2.47.0 | [%s](2026-09-22-2.47.0/REPORT.md) | Ready | preliminary |\n' "$final" >> "$WORKSPACE/$FOLDER/releases/index.md"
+  export VERGING_MODE="sync"
+  run_step resolve_inputs.sh; run_step reconcile.sh; check_exit "final reconciliation exits 0" 0 "$STEP_EXIT"
+  check_eq "the final rewrite moves latest/ to the newer report" "$final" "$(jq -r '.release_id' "$WORKSPACE/$FOLDER/latest/release.json")"
+  check_eq "latest/diff.json is final" "final" "$(jq -r '.stage' "$WORKSPACE/$FOLDER/latest/diff.json")"
+  end_case
+}
+
 # ---------- run ----------
 
 say "Verging Memory CI action test harness"
@@ -1821,6 +1893,9 @@ case_pending_after_fetch_failure
 case_pending_older_than_latest
 case_same_day_pending_does_not_replace_latest
 case_fetch_only_older_does_not_replace_latest
+case_same_day_later_pending_replaces_latest
+case_timestamp_free_fetch_then_later_pending_replaces_latest
+case_final_rewrite_replaces_older_latest
 case_push_retry
 case_push_refused
 case_reconcile_push_refused

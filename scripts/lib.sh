@@ -547,21 +547,35 @@ poll_release() {
   done
 }
 
+# instant_key TIMESTAMP: print a fixed-width UTC instant suitable for comparison.
+# Parsing first means equivalent ISO-8601 spellings (with or without fractions)
+# are compared as instants rather than as text.
+instant_key() {
+  date -u -d "$1" +%Y%m%d%H%M%S%N 2>/dev/null
+}
+
 # latest_is_newer FOLDER RELEASE_ID RELEASE_DATE RECEIVED_AT: true when the
-# release currently in latest/ must remain there. Receipt timestamps decide
-# same-day releases; a legacy record without one keeps latest/ on a tie.
+# release currently in latest/ must remain there. Reports are ordered by UTC
+# date, then receipt instant; on the same date a report without a receipt time
+# sorts before one with a receipt time, and two un-timed arrivals use arrival
+# order (the incoming report wins).
 latest_is_newer() {
-  local folder="$1" id="$2" release_date="$3" received_at="$4" latest_id latest_at latest_date
+  local folder="$1" id="$2" release_date="$3" received_at="$4" latest_id latest_at latest_date received_key latest_key
   latest_id="$(jq -r '.release_id // empty' "$folder/latest/release.json" 2>/dev/null || true)"
   [ -n "$latest_id" ] || return 1
   [ "$latest_id" = "$id" ] && return 1
   latest_at="$(jq -r '.received_at // empty' "$folder/latest/release.json" 2>/dev/null || true)"
-  if [ -n "$received_at" ] && [ -n "$latest_at" ]; then
-    [ "$received_at" \< "$latest_at" ] || [ "$received_at" = "$latest_at" ]
-    return
-  fi
   latest_date="$(grep -F "[$latest_id](" "$folder/releases/index.md" 2>/dev/null | head -n 1 | awk -F'|' '{gsub(/^ +| +$/, "", $2); print $2}')"
-  [ -n "$latest_date" ] && [ "$release_date" \< "$latest_date" -o "$release_date" = "$latest_date" ]
+  [ -n "$latest_date" ] || return 1
+  [ "$release_date" \< "$latest_date" ] && return 0
+  [ "$release_date" \> "$latest_date" ] && return 1
+  [ -n "$latest_at" ] || return 1
+  [ -n "$received_at" ] || return 0
+  received_key="$(instant_key "$received_at")"
+  latest_key="$(instant_key "$latest_at")"
+  # Preserve the existing report if an invalid legacy value cannot be ordered.
+  [ -n "$received_key" ] && [ -n "$latest_key" ] || return 0
+  [ "$received_key" \< "$latest_key" ] || [ "$received_key" = "$latest_key" ]
 }
 
 # fetch_and_write RELEASE_ID RELEASE_DATE [RECEIVED_AT]: fetch the report
@@ -570,7 +584,7 @@ latest_is_newer() {
 # vendor_version, verdict, slug, and report_path in the step state.
 fetch_and_write() {
   local id="$1" release_date="$2" received_at="${3:-}"
-  local folder report code vendor_version slug dir verdict stage rstatus due first_report existing existing_at
+  local folder report code vendor_version slug dir verdict stage rstatus due first_report existing existing_at latest_note
   folder="$(state_get folder)"
   report="$(state_dir)/report.json"
   code="$(api_get "/v1/releases/$id/report" "$report")"
@@ -595,8 +609,10 @@ fetch_and_write() {
   write_release_dir "$report" "$dir" "$received_at" || return 1
   if latest_is_newer "$folder" "$id" "$release_date" "$received_at"; then
     echo "latest/ left as it is: a newer release's report is already on record."
+    latest_note="latest/ remains the newer report already on record"
   else
     refresh_latest "$folder" "$dir"
+    latest_note="copy in $folder/latest/REPORT.md"
   fi
   ensure_folder_readme "$folder"
 
@@ -630,7 +646,7 @@ fetch_and_write() {
     echo
     echo "Stage: \`$stage\`, status: \`$rstatus\`, corrections_due_by: $due"
     echo
-    echo "Report: \`$dir/REPORT.md\` (copy in \`$folder/latest/REPORT.md\`)"
+    echo "Report: \`$dir/REPORT.md\` ($latest_note)"
     echo
     echo "<details><summary>Top of the report</summary>"
     echo

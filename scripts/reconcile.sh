@@ -181,8 +181,8 @@ for rel in "$releases_dir"/*/; do
   index_update_row "$folder" "$id" \
     "| $release_date | $version | [$id]($slug/REPORT.md) | $(verdict_cell "$report" "$verdict") | final |"
 
-  # latest/ is refreshed only when this release is the newest one on record.
-  if [ "$(jq -r '.release_id // empty' "$folder/latest/release.json" 2>/dev/null)" = "$id" ]; then
+  # The final rewrite follows the same ordering rule as a newly fetched report.
+  if ! latest_is_newer "$folder" "$id" "$release_date" "$received_at"; then
     refresh_latest "$folder" "$rel"
   fi
 

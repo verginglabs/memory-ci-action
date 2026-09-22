@@ -124,9 +124,12 @@ setup_env() {
   # The same value action.yml declares as the input default; the happy path
   # case checks the two stay in step.
   export VERGING_SUITES=""   # the action.yml default: omit -> all chosen suites
-  unset VERGING_VENDOR_VERSION VERGING_ENDPOINT VERGING_FOLDER 2>/dev/null
+  unset VERGING_VENDOR_VERSION VERGING_ENDPOINT VERGING_FOLDER VERGING_ACTIVATION_ID 2>/dev/null
   unset VERGING_PRODUCT_NAME VERGING_FETCH_ONLY_RELEASE_ID VERGING_POLL_TIMEOUT_MINUTES VERGING_MODE VERGING_LEGACY_ENVIRONMENTS 2>/dev/null
-  unset VERGING_DEFAULT_BRANCH VERGING_FALLBACK_PULL_REQUEST GH_PR_LIST_OUTPUT GH_COMMENTS_OUTPUT GH_SHIM_FAIL 2>/dev/null
+  unset VERGING_DEFAULT_BRANCH VERGING_FALLBACK_PULL_REQUEST GH_PR_LIST_OUTPUT GH_COMMENTS_OUTPUT GH_SHIM_FAIL GITHUB_RUN_ID GITHUB_JOB GITHUB_RUN_ATTEMPT 2>/dev/null
+  export GITHUB_RUN_ID="3141592653"
+  export GITHUB_JOB="release-tests"
+  export GITHUB_RUN_ATTEMPT="1"
 }
 
 make_repos() {
@@ -386,6 +389,50 @@ case_held() {
   check_grep "the held message is printed" "held: your environment is being set up on the Verging side" "$CASE_TMP/run.log"
   check_eq "polling continued past held to the report" "4" "$(cat "$MOCK_DIR/status-$rid.count")"
   check_file "report written after held cleared" "$WORKSPACE/$FOLDER/releases/2026-08-15-2.31.0/REPORT.md"
+  end_case
+}
+
+case_activation_id() {
+  begin_case "activation id passes through, a workflow re-run reuses its release, and its report lands in the folder"
+  local rid="run_20260922_activation"
+  local activation="act_6kxjg3n"
+  start_mock "$(happy_scenario "$rid")" || { end_case; return; }
+  setup_env
+  make_repos
+  export VERGING_ACTIVATION_ID="$activation"
+
+  run_step resolve_inputs.sh; check_exit "resolve_inputs accepts activation_id" 0 "$STEP_EXIT"
+  run_step reconcile.sh; run_step run_release.sh; check_exit "first activation submission completes" 0 "$STEP_EXIT"
+  local first_key first_reports
+  first_key="$(jq -rs '[.[] | select(.method == "POST")][0].headers["idempotency-key"]' "$MOCK_DIR/requests.log")"
+  first_reports="$(find "$WORKSPACE/$FOLDER/releases" -name REPORT.md | wc -l | tr -d ' ')"
+  check_eq "activation id is present in the first request body" "$activation" "$(posted_body | jq -r '.activation_id')"
+  check_eq "the idempotency key uses run id and job" "verging-memory-ci:3141592653:release-tests" "$first_key"
+  check_no_grep "the idempotency key never uses the run attempt" ":1" <(printf '%s' "$first_key")
+  check_file "the activation report is written like a release" "$WORKSPACE/$FOLDER/releases/2026-08-15-2.31.0/REPORT.md"
+
+  # A GitHub re-run changes GITHUB_RUN_ATTEMPT but is the same workflow run
+  # and job. The intake returns the original receipt for this same key.
+  export GITHUB_RUN_ATTEMPT="2"
+  run_step resolve_inputs.sh; run_step run_release.sh; check_exit "the workflow re-run completes" 0 "$STEP_EXIT"
+  local second_key
+  second_key="$(jq -rs '[.[] | select(.method == "POST")][1].headers["idempotency-key"]' "$MOCK_DIR/requests.log")"
+  check_eq "the workflow re-run keeps the same idempotency key" "$first_key" "$second_key"
+  check_eq "the workflow re-run receives the original release" "$rid" "$(cat "$RUNNER_TEMP/verging-memory-ci-state/release_id")"
+  check_eq "the workflow re-run writes no second report" "$first_reports" "$(find "$WORKSPACE/$FOLDER/releases" -name REPORT.md | wc -l | tr -d ' ')"
+  end_case
+}
+
+case_activation_refusal() {
+  begin_case "an activation id refusal reaches the workflow log unchanged"
+  local rid="run_20260922_refusal"
+  start_mock "$(happy_scenario "$rid" | jq '.receipt_code = 409 | .receipt = {error: "This activation ID is not available for this account.", fix: "Use the value your report gives."}')" || { end_case; return; }
+  setup_env
+  make_repos
+  export VERGING_ACTIVATION_ID="act_unknown"
+  run_step resolve_inputs.sh; run_step run_release.sh
+  check_exit "the unknown activation id is refused" 1 "$STEP_EXIT"
+  check_grep "the intake's plain refusal is unchanged" "This activation ID is not available for this account." "$CASE_TMP/run.log"
   end_case
 }
 
@@ -1599,6 +1646,8 @@ case_multi_setup_display_names
 case_environment_missing_refused
 case_name_rules
 case_held
+case_activation_id
+case_activation_refusal
 case_failed
 case_fetch_only
 case_wiring_check_input

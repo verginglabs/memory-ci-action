@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The release itself. Normal runs submit a release, poll until the report is
-# ready, and write it into the report folder. The release goes on record as
+# ready, and write it into the report folder. An activation_id, when supplied,
+# passes through to the intake unchanged. The release goes on record as
 # pending (releases/pending.json) the moment it is accepted; when the deadline
 # passes before the report is ready the job ends green with the verdict
 # "Pending", and the reconcile pass of a later job collects the report. When
@@ -86,6 +87,12 @@ vendor_version="$(state_get vendor_version)"
 agent_setups_json="$(state_get agent_setups_json)"
 suites_json="$(state_get suites_json)"
 product_name="$(state_get product_name)"
+activation_id="$(state_get activation_id)"
+
+# A GitHub workflow re-run keeps GITHUB_RUN_ID and GITHUB_JOB but changes
+# GITHUB_RUN_ATTEMPT. The intake binds this key to the original release, so a
+# re-run returns that release rather than starting another one.
+workflow_idempotency_key="verging-memory-ci:${GITHUB_RUN_ID:?GITHUB_RUN_ID is not set}:${GITHUB_JOB:?GITHUB_JOB is not set}"
 
 args=(--arg vendor_version "$vendor_version")
 filter='{vendor_version: $vendor_version}'
@@ -106,6 +113,10 @@ if [ -n "$product_name" ]; then
   args+=(--arg product_name "$product_name")
   filter="$filter + {product_name: \$product_name}"
 fi
+if [ -n "$activation_id" ]; then
+  args+=(--arg activation_id "$activation_id")
+  filter="$filter + {activation_id: \$activation_id}"
+fi
 body="$(jq -cn "${args[@]}" "$filter")"
 
 # submit_wiring_check BODY WHY: POST the same request with wiring_check: true,
@@ -123,6 +134,7 @@ submit_wiring_check() {
     -X POST "$api_base/v1/releases" \
     -H "Authorization: Bearer ${VERGING_API_KEY:?VERGING_API_KEY is not set}" \
     -H "Content-Type: application/json" \
+    -H "Idempotency-Key: ${workflow_idempotency_key}:wiring-check" \
     -d "$wbody")" || code="000"
   if [ "$code" != "202" ]; then
     echo "::error::POST /v1/releases (wiring check) returned HTTP $code (expected 202)"
@@ -185,6 +197,7 @@ code="$(curl -sS -o "$receipt" -w '%{http_code}' \
   -X POST "$api_base/v1/releases" \
   -H "Authorization: Bearer ${VERGING_API_KEY:?VERGING_API_KEY is not set}" \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $workflow_idempotency_key" \
   -d "$body")" || code="000"
 
 if [ "$code" != "202" ]; then

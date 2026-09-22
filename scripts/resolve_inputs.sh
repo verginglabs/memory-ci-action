@@ -144,6 +144,10 @@ if [ -n "$product_name" ]; then
 fi
 state_set product_name "$product_name"
 
+# activation_id is deliberately not interpreted here. The intake decides
+# whether this account can use it and returns its customer-facing refusal.
+state_set activation_id "${VERGING_ACTIVATION_ID:-}"
+
 # suites: comma separated values to a JSON array. An empty value means all the
 # suites chosen for the account: the suites field is omitted from the request.
 suites_csv="${VERGING_SUITES:-}"

@@ -66,7 +66,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _record(self, body):
         with open(os.path.join(MOCK_DIR, "requests.log"), "a") as f:
-            f.write(json.dumps({"method": self.command, "path": self.path, "body": body}) + "\n")
+            f.write(json.dumps({"method": self.command, "path": self.path, "body": body,
+                                "headers": {"idempotency-key": self.headers.get("Idempotency-Key")}}) + "\n")
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)

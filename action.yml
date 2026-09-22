@@ -37,6 +37,10 @@ inputs:
     description: "Your product's name as it should appear on the report. Letters, digits, spaces, dots, underscores, plus signs, and hyphens only; single spaces between words, none at the start or the end; up to 64 characters; must not start with a hyphen."
     required: false
     default: ""
+  activation_id:
+    description: "When activation is available for your account, use the value your report gives. A new value starts an activation and is billed as one. An earlier value tests that setup at the release price. An unknown value is refused: \"This activation ID is not available for this account.\""
+    required: false
+    default: ""
   fetch_only_release_id:
     description: "Fetch and commit the report of this existing release id without submitting anything. Use it to recover a job that failed after submitting; the id is in that job's log. A job that stopped waiting for its report needs no recovery: the release is on record as pending in the report folder, and the next job (or a mode: sync job) commits the report once it is ready."
     required: false
@@ -83,6 +87,7 @@ runs:
         VERGING_API_BASE: ${{ inputs.api_base }}
         VERGING_FOLDER: ${{ inputs.folder }}
         VERGING_PRODUCT_NAME: ${{ inputs.product_name }}
+        VERGING_ACTIVATION_ID: ${{ inputs.activation_id }}
         VERGING_FETCH_ONLY_RELEASE_ID: ${{ inputs.fetch_only_release_id }}
         VERGING_WIRING_CHECK: ${{ inputs.wiring_check }}
         VERGING_POLL_TIMEOUT_MINUTES: ${{ inputs.poll_timeout_minutes }}

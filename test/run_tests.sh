@@ -1473,6 +1473,27 @@ seed_pending_release() { # $1 release id, $2 vendor_version, $3 submitted_at: a 
   )
 }
 
+seed_reported_release() { # $1 release id, $2 version, $3 received_at: a report already in the folder
+  local rid="$1" version="$2" received_at="$3" date dir
+  date="${received_at:0:10}"
+  dir="$WORKSPACE/$FOLDER/releases/$date-$version"
+  mkdir -p "$dir"
+  make_report_md "Larkspur $version" "Ready" "Preliminary report" > "$dir/REPORT.md"
+  jq -n --arg rid "$rid" '{format: "release-diff/v1", release_id: $rid, release_verdict: "ready", stage: "preliminary"}' > "$dir/diff.json"
+  jq -n --arg rid "$rid" --arg version "$version" --arg received_at "$received_at" \
+    '{release_id: $rid, vendor_version: $version, scope: {suites: ["core-recall"]}, corrections_due_by: "-", received_at: $received_at}' > "$dir/release.json"
+  {
+    echo "# Releases"
+    echo
+    echo "| Date (UTC) | vendor_version | Release id | Release verdict | Stage |"
+    echo "|---|---|---|---|---|"
+    echo "| $date | $version | [$rid]($date-$version/REPORT.md) | Ready | preliminary |"
+  } > "$WORKSPACE/$FOLDER/releases/index.md"
+  mkdir -p "$WORKSPACE/$FOLDER/latest"
+  cp -R "$dir"/. "$WORKSPACE/$FOLDER/latest/"
+  cp "$ROOT/scripts/folder-readme.md" "$WORKSPACE/$FOLDER/README.md"
+}
+
 case_timeout_pending() {
   begin_case "the deadline passes: the job ends green with the release on record as pending, and a later sync job commits the report"
   local rid="run_20260826_5e6f7a8b9c0d"
@@ -1725,6 +1746,49 @@ case_pending_older_than_latest() {
   end_case
 }
 
+case_same_day_pending_does_not_replace_latest() {
+  begin_case "a same-day pending report that first reaches the folder does not replace a later report in latest/"
+  local old="run_20260922_0123456789ab" newer="run_20260922_aaaabbbbcccc" old_md scenario
+  old_md="$(make_report_md "Larkspur 2.40.0" "Ready" "Preliminary report")"
+  scenario="$(jq -n --arg old "$old" --arg old_md "$old_md" '{
+    status_by_id: {($old): [{release_id: $old, status: "report_ready", received_at: "2026-09-22T09:00:00.000Z"}]},
+    report_by_id: {($old): {release_id: $old, status: "report_ready", vendor_version: "2.40.0", scope: {suites: ["core-recall"]}, corrections_due_by: "-", report_markdown: $old_md, diff: {format: "release-diff/v1", release_verdict: "ready", stage: "preliminary"}, evidence: []}}
+  }')"
+  start_mock "$scenario" || { end_case; return; }
+  setup_env
+  make_repos
+  seed_reported_release "$newer" "2.41.0" "2026-09-22T14:00:00.000Z"
+  seed_pending_release "$old" "2.40.0" "2026-09-22T09:00:00.000Z"
+  unset VERGING_AGENT_SETUPS
+  export VERGING_MODE="sync"
+  run_step resolve_inputs.sh; check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh; check_exit "reconcile exits 0" 0 "$STEP_EXIT"
+  check_file "the older report is written for the first time" "$WORKSPACE/$FOLDER/releases/2026-09-22-2.40.0/REPORT.md"
+  check_eq "latest/ stays with the later same-day release" "$newer" "$(jq -r '.release_id' "$WORKSPACE/$FOLDER/latest/release.json")"
+  end_case
+}
+
+case_fetch_only_older_does_not_replace_latest() {
+  begin_case "fetch-only of an older release does not replace a newer latest/ report"
+  local old="run_20260922_deadbeefcafe" newer="run_20260922_feedfacebabe" old_md scenario
+  old_md="$(make_report_md "Larkspur 2.40.0" "Ready" "Final report")"
+  scenario="$(jq -n --arg old "$old" --arg old_md "$old_md" '{
+    status_by_id: {($old): [{release_id: $old, status: "corrected", received_at: "2026-09-22T09:00:00.000Z"}]},
+    report_by_id: {($old): {release_id: $old, status: "corrected", vendor_version: "2.40.0", scope: {suites: ["core-recall"]}, corrections_due_by: "-", report_markdown: $old_md, diff: {format: "release-diff/v1", release_verdict: "ready", stage: "final"}, evidence: []}}
+  }')"
+  start_mock "$scenario" || { end_case; return; }
+  setup_env
+  make_repos
+  seed_reported_release "$newer" "2.41.0" "2026-09-22T14:00:00.000Z"
+  export VERGING_FETCH_ONLY_RELEASE_ID="$old"
+  run_step resolve_inputs.sh; check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh; check_exit "reconcile exits 0" 0 "$STEP_EXIT"
+  run_step run_release.sh; check_exit "fetch-only exits 0" 0 "$STEP_EXIT"
+  check_file "the older fetched report is written for the first time" "$WORKSPACE/$FOLDER/releases/2026-09-22-2.40.0/REPORT.md"
+  check_eq "latest/ stays with the newer report" "$newer" "$(jq -r '.release_id' "$WORKSPACE/$FOLDER/latest/release.json")"
+  end_case
+}
+
 # ---------- run ----------
 
 say "Verging Memory CI action test harness"
@@ -1755,6 +1819,8 @@ case_pending_running_then_failed
 case_fetch_only_pending
 case_pending_after_fetch_failure
 case_pending_older_than_latest
+case_same_day_pending_does_not_replace_latest
+case_fetch_only_older_does_not_replace_latest
 case_push_retry
 case_push_refused
 case_reconcile_push_refused

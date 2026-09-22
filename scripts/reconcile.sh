@@ -79,12 +79,6 @@ for id in $(pending_ids "$folder"); do
   case "$status" in
     report_ready|corrected)
       echo "The report for $id is ready (status: $status); fetching it."
-      # latest/ stays with a newer release whose report is already on record.
-      latest_mode=""
-      newest="$(index_newest_date "$folder")"
-      if [ -n "$newest" ] && [ "$release_date" \< "$newest" ]; then
-        latest_mode="keep-latest"
-      fi
       # fetch_and_write records the fetched release in the step state. This
       # job's own release, resolved before this pass, must not be replaced by
       # it, so the state is put back afterwards.
@@ -96,7 +90,7 @@ for id in $(pending_ids "$folder"); do
       saved_path="$(state_get report_path)"
       state_set vendor_version "$version"
       written=0
-      if fetch_and_write "$id" "$release_date" $latest_mode; then
+      if fetch_and_write "$id" "$release_date" "$submitted_at"; then
         written=1
         verdict="$(state_get verdict)"
       fi
@@ -165,7 +159,8 @@ for rel in "$releases_dir"/*/; do
     continue
   fi
 
-  if ! write_release_dir "$report" "$rel"; then
+  received_at="$(jq -r '.received_at // empty' "$rel/release.json")"
+  if ! write_release_dir "$report" "$rel" "$received_at"; then
     echo "::warning::could not rewrite $rel from the fetched final report; leaving it as it was"
     git checkout -- "$rel" 2>/dev/null || true
     continue

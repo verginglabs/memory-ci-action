@@ -140,10 +140,10 @@ evidence_name_ok() {
   safe_path_segment_ok "$file"
 }
 
-# write_release_dir REPORT_JSON DIR: write REPORT.md, diff.json, release.json,
-# and evidence/ into DIR from a fetched report body.
+# write_release_dir REPORT_JSON DIR [RECEIVED_AT]: write REPORT.md, diff.json,
+# release.json, and evidence/ into DIR from a fetched report body.
 write_release_dir() {
-  local report="$1" dir="$2" count row name written refused prior
+  local report="$1" dir="$2" received_at="${3:-}" count row name written refused prior
   mkdir -p "$dir"
 
   # REPORT.md: the markdown the API returns.
@@ -161,8 +161,11 @@ write_release_dir() {
     echo "::warning::the report body has no diff; diff.json not written"
   fi
 
-  # release.json: the four fields the integration guide names.
-  jq '{release_id, vendor_version, scope, corrections_due_by}' "$report" > "$dir/release.json"
+  # release.json: the four fields the integration guide names, plus the
+  # receipt time when it is available so same-day releases stay ordered.
+  jq --arg received_at "$received_at" \
+    '{release_id, vendor_version, scope, corrections_due_by} + (if $received_at == "" then {} else {received_at: $received_at} end)' \
+    "$report" > "$dir/release.json"
 
   # evidence/: the files the report's Evidence pointers name, one per failed
   # test per release; nothing to write when every test passed. Every name is
@@ -544,15 +547,30 @@ poll_release() {
   done
 }
 
-# fetch_and_write RELEASE_ID RELEASE_DATE [keep-latest]: fetch the report
+# latest_is_newer FOLDER RELEASE_ID RELEASE_DATE RECEIVED_AT: true when the
+# release currently in latest/ must remain there. Receipt timestamps decide
+# same-day releases; a legacy record without one keeps latest/ on a tie.
+latest_is_newer() {
+  local folder="$1" id="$2" release_date="$3" received_at="$4" latest_id latest_at latest_date
+  latest_id="$(jq -r '.release_id // empty' "$folder/latest/release.json" 2>/dev/null || true)"
+  [ -n "$latest_id" ] || return 1
+  [ "$latest_id" = "$id" ] && return 1
+  latest_at="$(jq -r '.received_at // empty' "$folder/latest/release.json" 2>/dev/null || true)"
+  if [ -n "$received_at" ] && [ -n "$latest_at" ]; then
+    [ "$received_at" \< "$latest_at" ] || [ "$received_at" = "$latest_at" ]
+    return
+  fi
+  latest_date="$(grep -F "[$latest_id](" "$folder/releases/index.md" 2>/dev/null | head -n 1 | awk -F'|' '{gsub(/^ +| +$/, "", $2); print $2}')"
+  [ -n "$latest_date" ] && [ "$release_date" \< "$latest_date" -o "$release_date" = "$latest_date" ]
+}
+
+# fetch_and_write RELEASE_ID RELEASE_DATE [RECEIVED_AT]: fetch the report
 # and write the release directory, latest/, the index row, and the folder
 # README, and clear the release from the pending record. Records
-# vendor_version, verdict, slug, and report_path in the step state. With
-# "keep-latest" the latest/ copy is left alone: the reconcile pass passes it
-# when a newer release's report is already on record.
+# vendor_version, verdict, slug, and report_path in the step state.
 fetch_and_write() {
-  local id="$1" release_date="$2" latest_mode="${3:-}"
-  local folder report code vendor_version slug dir verdict stage rstatus due first_report existing latest_id
+  local id="$1" release_date="$2" received_at="${3:-}"
+  local folder report code vendor_version slug dir verdict stage rstatus due first_report existing existing_at
   folder="$(state_get folder)"
   report="$(state_dir)/report.json"
   code="$(api_get "/v1/releases/$id/report" "$report")"
@@ -567,12 +585,15 @@ fetch_and_write() {
   [ -n "$vendor_version" ] || vendor_version="not-recorded"
 
   existing="$(existing_slug_for "$folder" "$id" || true)"
+  if [ -n "$existing" ]; then
+    existing_at="$(jq -r '.received_at // empty' "$folder/releases/$existing/release.json" 2>/dev/null || true)"
+    [ -n "$existing_at" ] && received_at="$existing_at"
+  fi
   slug="$(slug_for "$release_date" "$vendor_version" "$id" "$folder")"
   release_date="$(date_for_slug "$slug" "$release_date")"
   dir="$folder/releases/$slug"
-  write_release_dir "$report" "$dir" || return 1
-  latest_id="$(jq -r '.release_id // empty' "$folder/latest/release.json" 2>/dev/null || true)"
-  if [ "$latest_mode" = "keep-latest" ] || { [ -n "$existing" ] && [ -n "$latest_id" ] && [ "$latest_id" != "$id" ]; }; then
+  write_release_dir "$report" "$dir" "$received_at" || return 1
+  if latest_is_newer "$folder" "$id" "$release_date" "$received_at"; then
     echo "latest/ left as it is: a newer release's report is already on record."
   else
     refresh_latest "$folder" "$dir"

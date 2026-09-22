@@ -53,6 +53,7 @@ if [ -n "$fetch_only" ]; then
     exit 1
   fi
   status="$(jq -r '.status // "unknown"' "$status_file")"
+  received_at="$(jq -r '.received_at // empty' "$status_file")"
   release_date="$(jq -r '.received_at // empty' "$status_file" | cut -c1-10)"
   [ -n "$release_date" ] || release_date="$(date -u +%Y-%m-%d)"
   case "$status" in
@@ -78,7 +79,7 @@ if [ -n "$fetch_only" ]; then
       wait_for_report "$id"
       ;;
   esac
-  fetch_and_write "$id" "$release_date"
+  fetch_and_write "$id" "$release_date" "$received_at"
   exit 0
 fi
 
@@ -287,4 +288,4 @@ echo "Release $release_id is on record as pending in $folder/releases/pending.js
 } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
 wait_for_report "$release_id"
-fetch_and_write "$release_id" "$release_date"
+fetch_and_write "$release_id" "$release_date" "$submitted_at"

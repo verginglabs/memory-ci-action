@@ -22,6 +22,10 @@ check_eq() { # desc expected actual
   if [ "$2" = "$3" ]; then say "    ok: $1"; else note_fail "$1 (expected '$2', got '$3')"; fi
 }
 
+check_ne() { # desc unexpected actual
+  if [ "$2" != "$3" ]; then say "    ok: $1"; else note_fail "$1 (unexpected '$3')"; fi
+}
+
 check_exit() { # desc expected_code actual_code
   check_eq "$1" "$2" "$3"
 }
@@ -40,6 +44,10 @@ check_grep() { # desc fixed-string file
 
 check_no_grep() { # desc fixed-string file
   if grep -qF -- "$2" "$3" 2>/dev/null; then note_fail "$1 (found '$2' in $3)"; else say "    ok: $1"; fi
+}
+
+check_match() { # desc extended-regex value
+  if [[ "$3" =~ $2 ]]; then say "    ok: $1"; else note_fail "$1 (value '$3' does not match '$2')"; fi
 }
 
 check_dirs_equal() { # desc dir1 dir2
@@ -77,6 +85,7 @@ start_mock() { # $1 scenario json
   mkdir -p "$MOCK_DIR"
   printf '%s' "$1" > "$MOCK_DIR/scenario.json"
   : > "$MOCK_DIR/requests.log"
+  rm -f "$MOCK_DIR/idempotency.json"
   rm -f "$MOCK_DIR/port"
   MOCK_DIR="$MOCK_DIR" python3 "$TESTDIR/mock_api.py" &
   MOCK_PID=$!
@@ -393,7 +402,7 @@ case_held() {
 }
 
 case_activation_id() {
-  begin_case "activation id passes through, a workflow re-run reuses its release, and its report lands in the folder"
+  begin_case "activation id passes through, a workflow re-run returns its original release, and its report lands in the folder"
   local rid="run_20260922_activation"
   local activation="act_6kxjg3n"
   start_mock "$(happy_scenario "$rid")" || { end_case; return; }
@@ -407,16 +416,23 @@ case_activation_id() {
   first_key="$(jq -rs '[.[] | select(.method == "POST")][0].headers["idempotency-key"]' "$MOCK_DIR/requests.log")"
   first_reports="$(find "$WORKSPACE/$FOLDER/releases" -name REPORT.md | wc -l | tr -d ' ')"
   check_eq "activation id is present in the first request body" "$activation" "$(posted_body | jq -r '.activation_id')"
-  check_eq "the idempotency key uses run id and job" "verging-memory-ci:3141592653:release-tests" "$first_key"
-  check_no_grep "the idempotency key never uses the run attempt" ":1" <(printf '%s' "$first_key")
+  check_match "the idempotency key has exactly its three required parts" '^verging-memory-ci:[^:]+:[^:]+$' "$first_key"
+  check_eq "the idempotency key uses this run id and job" "verging-memory-ci:${GITHUB_RUN_ID}:${GITHUB_JOB}" "$first_key"
   check_file "the activation report is written like a release" "$WORKSPACE/$FOLDER/releases/2026-08-15-2.31.0/REPORT.md"
+
+  local other_receipt other_id
+  other_receipt="$CASE_TMP/other-key-receipt.json"
+  curl -sS -o "$other_receipt" -X POST "$VERGING_API_BASE/v1/releases" \
+    -H "Content-Type: application/json" -H "Idempotency-Key: ${first_key}-different" -d "$(posted_body)"
+  other_id="$(jq -r '.release_id' "$other_receipt")"
+  check_ne "a different idempotency key gets a new release" "$rid" "$other_id"
 
   # A GitHub re-run changes GITHUB_RUN_ATTEMPT but is the same workflow run
   # and job. The intake returns the original receipt for this same key.
   export GITHUB_RUN_ATTEMPT="2"
-  run_step resolve_inputs.sh; run_step run_release.sh; check_exit "the workflow re-run completes" 0 "$STEP_EXIT"
+  run_step resolve_inputs.sh; run_step reconcile.sh; run_step run_release.sh; check_exit "the workflow re-run completes" 0 "$STEP_EXIT"
   local second_key
-  second_key="$(jq -rs '[.[] | select(.method == "POST")][1].headers["idempotency-key"]' "$MOCK_DIR/requests.log")"
+  second_key="$(jq -rs '[.[] | select(.method == "POST")][-1].headers["idempotency-key"]' "$MOCK_DIR/requests.log")"
   check_eq "the workflow re-run keeps the same idempotency key" "$first_key" "$second_key"
   check_eq "the workflow re-run receives the original release" "$rid" "$(cat "$RUNNER_TEMP/verging-memory-ci-state/release_id")"
   check_eq "the workflow re-run writes no second report" "$first_reports" "$(find "$WORKSPACE/$FOLDER/releases" -name REPORT.md | wc -l | tr -d ' ')"
@@ -620,6 +636,7 @@ case_not_set_up_fallback() {
   start_mock "$(wiring_scenario "$wid" | jq --argjson r "$not_set_up_receipt" '.receipt_code = 409 | .receipt = $r')" || { end_case; return; }
   setup_env
   make_repos
+  export VERGING_ACTIVATION_ID="act_first_push"
 
   run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
   run_step reconcile.sh;       check_exit "reconcile exits 0" 0 "$STEP_EXIT"
@@ -638,7 +655,8 @@ case_not_set_up_fallback() {
   second="$(jq -rs '[.[] | select(.method == "POST")][1].body' "$MOCK_DIR/requests.log")"
   check_eq "the first request is the release (no wiring_check field)" "null" "$(printf '%s' "$first" | jq -r '.wiring_check')"
   check_eq "the second request is the wiring check" "true" "$(printf '%s' "$second" | jq -r '.wiring_check')"
-  check_eq "the wiring check carries the release's own fields" "$(printf '%s' "$first" | jq -c '.')" "$(printf '%s' "$second" | jq -c 'del(.wiring_check)')"
+  check_eq "the release is the only request that carries the new activation id" '["act_first_push"]' "$(jq -c -rs '[.[] | select(.method == "POST") | .body | fromjson | .activation_id | select(.)]' "$MOCK_DIR/requests.log")"
+  check_eq "the wiring check carries the release fields except activation_id" "$(printf '%s' "$first" | jq -c 'del(.activation_id)')" "$(printf '%s' "$second" | jq -c 'del(.wiring_check, .activation_id)')"
   check_grep "the log states the refusal by its code" "POST /v1/releases returned HTTP 409 with code not_set_up" "$CASE_TMP/run.log"
   check_grep "the refusal's own text is shown" "Core Recall on staging-mcp is not set up yet" "$CASE_TMP/run.log"
   check_grep "the exact notice is emitted" "$WIRING_NOTICE" "$CASE_TMP/run.log"
@@ -672,12 +690,14 @@ case_other_409_fails() {
   # 2. A 409 with a different code: the English is never matched, the code is.
   printf '%s' "$(wiring_scenario "$wid" | jq --argjson r "$not_set_up_receipt" '.receipt_code = 409 | .receipt = ($r | .code = "something_else")')" > "$MOCK_DIR/scenario.json"
   : > "$MOCK_DIR/requests.log"
+  rm -f "$MOCK_DIR/idempotency.json"
   run_step run_release.sh;     check_exit "a 409 with another code fails even though the text reads not set up" 1 "$STEP_EXIT"
   check_eq "nothing else was submitted" "1" "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
 
   # 3. The code on a status other than 409 is not the door-check.
   printf '%s' "$(wiring_scenario "$wid" | jq --argjson r "$not_set_up_receipt" '.receipt_code = 402 | .receipt = $r')" > "$MOCK_DIR/scenario.json"
   : > "$MOCK_DIR/requests.log"
+  rm -f "$MOCK_DIR/idempotency.json"
   run_step run_release.sh;     check_exit "a 402 carrying the code still fails" 1 "$STEP_EXIT"
   check_eq "nothing else was submitted" "1" "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
   check_grep "the error names the status" "::error::POST /v1/releases returned HTTP 402 (expected 202)" "$CASE_TMP/run.log"
@@ -685,6 +705,7 @@ case_other_409_fails() {
   # 4. The wiring check itself refused after a not_set_up 409: a real failure.
   printf '%s' "$(wiring_scenario "$wid" | jq --argjson r "$not_set_up_receipt" '.receipt_code = 409 | .receipt = $r | .wiring_receipt_code = 401 | .wiring_receipt = {error: "invalid API key", fix: "pass the key issued at onboarding"}')" > "$MOCK_DIR/scenario.json"
   : > "$MOCK_DIR/requests.log"
+  rm -f "$MOCK_DIR/idempotency.json"
   run_step run_release.sh;     check_exit "a refused wiring check fails the job" 1 "$STEP_EXIT"
   check_grep "the error names the wiring check" "::error::POST /v1/releases (wiring check) returned HTTP 401" "$CASE_TMP/run.log"
   check_no_path "no report folder written" "$WORKSPACE/$FOLDER"
@@ -1362,6 +1383,7 @@ set_scenario() {
   printf '%s' "$1" > "$MOCK_DIR/scenario.json"
   rm -f "$MOCK_DIR"/status-*.count
   : > "$MOCK_DIR/requests.log"
+  rm -f "$MOCK_DIR/idempotency.json"
 }
 
 seed_pending_release() { # $1 release id, $2 vendor_version, $3 submitted_at: a pending record an earlier job committed

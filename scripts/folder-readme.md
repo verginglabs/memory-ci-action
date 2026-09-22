@@ -48,7 +48,7 @@ The check run on the first release, and the comment the action posts on a pull r
 
 > **Verging Memory CI: baseline recorded**
 >
-> Baseline recorded: 11 of 11 tests passing on Claude Code Opus 5. The release verdict starts with your next release.
+> Baseline recorded: 11 of 11 tests passing. The release verdict starts with your next release.
 
 The check is neutral, never a failure, and the report is committed to this folder exactly as every later report is. The release verdict starts with the next release, which has this one to compare against.
 

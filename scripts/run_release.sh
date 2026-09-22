@@ -126,7 +126,10 @@ body="$(jq -cn "${args[@]}" "$filter")"
 # read it. A wiring check is served on delivery, so nothing is polled.
 submit_wiring_check() {
   local body="$1" why="$2" wbody receipt code release_id release_date
-  wbody="$(printf '%s' "$body" | jq -c '. + {wiring_check: true}')"
+  # A wiring check is free and must not create or resume an activation.  Its
+  # separate request key is therefore paired with a body that omits this
+  # release-only field.
+  wbody="$(printf '%s' "$body" | jq -c 'del(.activation_id) + {wiring_check: true}')"
   echo "POST $api_base/v1/releases (wiring check)"
   echo "Request body: $wbody"
   receipt="$(state_dir)/receipt.json"

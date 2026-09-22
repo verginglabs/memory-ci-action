@@ -27,6 +27,9 @@ deeper path, an absolute path) so the refusal path is exercised too.
 
 Every request is appended to $MOCK_DIR/requests.log as one JSON line.
 The chosen port is written to $MOCK_DIR/port.
+
+Release submissions also model intake idempotency: a repeated key receives
+its original response, while a new key receives a distinct release id.
 """
 import json
 import os
@@ -50,6 +53,30 @@ def bump(name):
     with open(path, "w") as f:
         f.write(str(n))
     return n
+
+
+def idempotent_release(scenario, key):
+    """Return the response bound to KEY, creating a distinct release for new keys."""
+    path = os.path.join(MOCK_DIR, "idempotency.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            replies = json.load(f)
+    else:
+        replies = {}
+    if key in replies:
+        return replies[key]["code"], replies[key]["body"]
+
+    body = scenario["receipt"]
+    if replies and "release_id" in body:
+        body = dict(body)
+        body["release_id"] = body["release_id"] + "-new-" + str(len(replies) + 1)
+        if "status_url" in body:
+            body["status_url"] = "/v1/releases/" + body["release_id"]
+    reply = {"code": scenario.get("receipt_code", 202), "body": body}
+    replies[key] = reply
+    with open(path, "w") as f:
+        json.dump(replies, f)
+    return reply["code"], reply["body"]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -83,7 +110,8 @@ class Handler(BaseHTTPRequestHandler):
             if wiring and "wiring_receipt" in sc:
                 self._send(sc.get("wiring_receipt_code", 202), sc["wiring_receipt"])
             else:
-                self._send(sc.get("receipt_code", 202), sc["receipt"])
+                code, response = idempotent_release(sc, self.headers.get("Idempotency-Key") or "")
+                self._send(code, response)
         else:
             self._send(404, {"error": "unknown path", "fix": "check the path"})
 

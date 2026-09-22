@@ -55,7 +55,15 @@ if [ -n "$fetch_only" ]; then
   status="$(jq -r '.status // "unknown"' "$status_file")"
   received_at="$(jq -r '.received_at // empty' "$status_file")"
   release_date="$(jq -r '.received_at // empty' "$status_file" | cut -c1-10)"
-  [ -n "$release_date" ] || release_date="$(date -u +%Y-%m-%d)"
+  if [ -z "$release_date" ]; then
+    release_date="$(recorded_release_date "$folder" "$id" || true)"
+    if [ -n "$release_date" ]; then
+      echo "The status for $id has no received_at; using its recorded folder date $release_date."
+    else
+      release_date="$(date -u +%Y-%m-%d)"
+      echo "The status for $id has no received_at and the folder has no prior date; using current UTC date $release_date."
+    fi
+  fi
   case "$status" in
     report_ready|corrected)
       ;;

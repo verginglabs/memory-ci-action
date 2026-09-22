@@ -290,6 +290,20 @@ date_for_slug() {
   fi
 }
 
+# recorded_release_date FOLDER RELEASE_ID: print the UTC date the folder has
+# already assigned to this release.  A directory is authoritative; the index
+# is retained as a fallback for an older or partially-written folder.
+recorded_release_date() {
+  local folder="$1" release_id="$2" slug date
+  slug="$(existing_slug_for "$folder" "$release_id" || true)"
+  if [ -n "$slug" ]; then
+    date="$(date_for_slug "$slug" "")"
+    [ -n "$date" ] && { printf '%s' "$date"; return 0; }
+  fi
+  grep -F "[$release_id](" "$folder/releases/index.md" 2>/dev/null | head -n 1 \
+    | awk -F'|' '{gsub(/^ +| +$/, "", $2); print $2}'
+}
+
 ensure_index() {
   local index="$1/releases/index.md"
   mkdir -p "$1/releases"

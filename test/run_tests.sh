@@ -123,7 +123,9 @@ setup_env() {
     'exec "$VERGING_REAL_DATE" "$@"' > "$CASE_TMP/bin/date"
   chmod +x "$CASE_TMP/bin/date"
   export PATH="$CASE_TMP/bin:$PATH"
-  unset VERGING_TEST_UTC_DAY
+  # Every case starts from a pinned clock.  Individual cases may move it to
+  # exercise a date transition, but none may inherit the machine's calendar.
+  export VERGING_TEST_UTC_DAY="${VERGING_TEST_DEFAULT_UTC_DAY:-2026-09-22}"
   export RUNNER_TEMP="$CASE_TMP/runner"
   mkdir -p "$RUNNER_TEMP"
   export GITHUB_OUTPUT="$CASE_TMP/github_output"
@@ -1789,6 +1791,31 @@ case_fetch_only_older_does_not_replace_latest() {
   end_case
 }
 
+case_timestamp_free_fetch_uses_recorded_folder_date() {
+  begin_case "a timestamp-free fetch-only rewrite uses its recorded folder date and keeps newer latest/"
+  local old="run_20260920_datedfolder001" newer="run_20260921_datedfolder002" old_md scenario index
+  old_md="$(make_report_md "Larkspur 2.40.0" "Ready" "Final report")"
+  scenario="$(jq -n --arg old "$old" --arg old_md "$old_md" '{
+    status_by_id: {($old): [{release_id: $old, status: "corrected"}]},
+    report_by_id: {($old): {release_id: $old, status: "corrected", vendor_version: "2.40.0", scope: {suites: ["core-recall"]}, corrections_due_by: "-", report_markdown: $old_md, diff: {format: "release-diff/v1", release_id: $old, release_verdict: "ready", stage: "final"}, evidence: []}}
+  }')"
+  start_mock "$scenario" || { end_case; return; }
+  setup_env
+  make_repos
+  seed_reported_release "$old" "2.40.0" "2026-09-20T09:00:00.000Z"
+  seed_reported_release "$newer" "2.41.0" "2026-09-21T14:00:00.000Z"
+  export VERGING_FETCH_ONLY_RELEASE_ID="$old"
+  run_step resolve_inputs.sh; check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh; check_exit "reconcile exits 0" 0 "$STEP_EXIT"
+  run_step run_release.sh; check_exit "timestamp-free fetch-only exits 0" 0 "$STEP_EXIT"
+  index="$WORKSPACE/$FOLDER/releases/index.md"
+  check_grep "the fetched report retains its recorded UTC date" "| 2026-09-20 | 2.40.0 | [$old](2026-09-20-2.40.0/REPORT.md) | Ready | final |" "$index"
+  check_grep "the receipt explains the recorded-date fallback" "The status for $old has no received_at; using its recorded folder date 2026-09-20." "$CASE_TMP/run.log"
+  check_eq "latest/ remains yesterday's newer report" "$newer" "$(jq -r '.release_id' "$WORKSPACE/$FOLDER/latest/release.json")"
+  unset VERGING_FETCH_ONLY_RELEASE_ID
+  end_case
+}
+
 case_same_day_later_pending_replaces_latest() {
   begin_case "a later same-second pending receipt replaces latest/ (fractional seconds are instants, not text)"
   local old="run_20260922_111122223333" later="run_20260922_444455556666" later_md scenario
@@ -1823,6 +1850,7 @@ case_timestamp_free_fetch_then_later_pending_replaces_latest() {
   start_mock "$scenario" || { end_case; return; }
   setup_env
   make_repos
+  export VERGING_TEST_UTC_DAY="2026-09-22"
   export VERGING_FETCH_ONLY_RELEASE_ID="$missing"
   run_step resolve_inputs.sh; run_step reconcile.sh; run_step run_release.sh; check_exit "timestamp-free fetch-only exits 0" 0 "$STEP_EXIT"
   check_eq "the fetched report has no receipt time" "" "$(jq -r '.received_at // empty' "$WORKSPACE/$FOLDER/latest/release.json")"
@@ -1893,6 +1921,7 @@ case_pending_after_fetch_failure
 case_pending_older_than_latest
 case_same_day_pending_does_not_replace_latest
 case_fetch_only_older_does_not_replace_latest
+case_timestamp_free_fetch_uses_recorded_folder_date
 case_same_day_later_pending_replaces_latest
 case_timestamp_free_fetch_then_later_pending_replaces_latest
 case_final_rewrite_replaces_older_latest

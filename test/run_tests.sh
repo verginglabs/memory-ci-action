@@ -396,6 +396,116 @@ case_name_rules() {
   end_case
 }
 
+case_documented_integration_setup_name() {
+  begin_case "a documented integration agent setup is accepted exactly as the account names it"
+  MOCK_PORT="0"
+  setup_env
+  make_repos
+
+  # The name an account carries for an agent setup Verging Labs set up as a
+  # documented integration: the setup's own words followed by the ending that
+  # setup type always has. The words are assembled here rather than spelled
+  # out, the way the folder README check above assembles its label.
+  local runner="GP"; runner="Hermes ${runner}T-5.6 Luna"
+  local documented="$runner (documented integration)"
+  local second="Cla"; second="${second}ude Code Opus 5 (documented integration)"
+
+  # ---- the rule as a function, against the rule the intake applies to a
+  # setup name: the display-name rule, plus this one literal ending.
+  ( set +u; source "$ROOT/scripts/lib.sh" >/dev/null 2>&1
+    base39="$(printf 'a%.0s' $(seq 1 39))"
+    base40="$(printf 'a%.0s' $(seq 1 40))"
+    fails=0
+    accept_setup() { setup_name_ok "$1" || { echo "SETUP SHOULD ACCEPT: [$1]"; fails=1; }; }
+    refuse_setup() { setup_name_ok "$1" && { echo "SETUP SHOULD REFUSE: [$1]"; fails=1; }; }
+
+    # The names our own documented integration accounts carry.
+    accept_setup "$documented"
+    accept_setup "$second"
+    accept_setup "Production MCP (documented integration)"
+    accept_setup "Larkspur.Memory-2+beta_1 (documented integration)"
+    # A plain display name is untouched by the exception.
+    accept_setup "Production MCP"
+    accept_setup "staging-mcp"
+    # 64 characters including the ending is the last accepted length.
+    accept_setup "$base39 (documented integration)"
+    refuse_setup "$base40 (documented integration)"
+
+    # The exception is that ending and nothing else: no other parentheses, no
+    # other wording, no second copy, and never an empty name in front of it.
+    refuse_setup "Production MCP (documented integration) staging"
+    refuse_setup "Production MCP (documented Integration)"
+    refuse_setup "Production MCP(documented integration)"
+    refuse_setup "Production MCP (documented  integration)"
+    refuse_setup "Production MCP (documented integration) (documented integration)"
+    refuse_setup " (documented integration)"
+    refuse_setup "(documented integration)"
+    refuse_setup "bad name! (documented integration)"
+    refuse_setup "-leading (documented integration)"
+    refuse_setup "Production (MCP) integration"
+
+    # product_name is not a setup name: the intake gives it no exception, so
+    # the display-name rule still governs it here.
+    safe_title_ok "$documented" && { echo "TITLE SHOULD REFUSE: [$documented]"; fails=1; }
+
+    # The folder the evidence files go in. The slug keeps the ending, and that
+    # segment is one the action writes; a dots-only segment never is.
+    [ "$(agent_setup_slug "$documented")" = "hermes-gpt-5.6-luna-(documented-integration)" ] \
+      || { echo "SLUG WRONG: [$(agent_setup_slug "$documented")]"; fails=1; }
+    safe_path_segment_ok "$(agent_setup_slug "$documented")" \
+      || { echo "SEGMENT SHOULD ACCEPT: [$(agent_setup_slug "$documented")]"; fails=1; }
+    evidence_name_ok "evidence/$(agent_setup_slug "$documented")/cr1c07-2.31.0.md" \
+      || { echo "EV SHOULD ACCEPT: documented setup folder"; fails=1; }
+    for bad in "." ".." "..." "...." "-(documented-integration)" "a/b-(documented-integration)"; do
+      safe_path_segment_ok "$bad" && { echo "SEGMENT SHOULD REFUSE: [$bad]"; fails=1; }
+    done
+    evidence_name_ok "evidence/.../x.md" && { echo "EV SHOULD REFUSE: dots-only folder"; fails=1; }
+    exit "$fails"
+  ) > "$CASE_TMP/documented.log" 2>&1
+  if [ "$?" = "0" ]; then
+    say "    ok: the setup name rule matches the rule the intake applies"
+  else
+    note_fail "the setup name rule disagrees with the intake:"
+    sed 's/^/      /' "$CASE_TMP/documented.log"
+  fi
+
+  # ---- and through the step a customer's run actually executes.
+  export VERGING_AGENT_SETUPS="$documented"
+  run_step resolve_inputs.sh
+  check_exit "the account's own documented integration setup name is accepted" 0 "$STEP_EXIT"
+  check_eq "the setup name travels verbatim, ending and all" "$(jq -cn --arg n "$documented" '[$n]')" \
+    "$(cat "$RUNNER_TEMP/verging-memory-ci-state/agent_setups_json")"
+
+  export VERGING_AGENT_SETUPS="$documented,staging-mcp"
+  run_step resolve_inputs.sh
+  check_exit "a documented integration setup runs alongside a plain one" 0 "$STEP_EXIT"
+  check_eq "both names travel verbatim" "$(jq -cn --arg n "$documented" '[$n, "staging-mcp"]')" \
+    "$(cat "$RUNNER_TEMP/verging-memory-ci-state/agent_setups_json")"
+
+  # The negative: a name that only looks like it, still refused, and the
+  # refusal tells a customer what their account's name ends in.
+  export VERGING_AGENT_SETUPS="$runner (documented integration"
+  run_step resolve_inputs.sh
+  check_exit "a name that is not the account's is still refused" 1 "$STEP_EXIT"
+  check_grep "the refusal names the setup" "$runner (documented integration' is not valid" "$CASE_TMP/run.log"
+  check_grep "the refusal says how a documented integration name ends" "ending in ' (documented integration)'" "$CASE_TMP/run.log"
+
+  # A dots-only name is refused by the folder rule, in its own plain sentence.
+  export VERGING_AGENT_SETUPS="..."
+  run_step resolve_inputs.sh
+  check_exit "a dots-only setup name is refused" 1 "$STEP_EXIT"
+  check_grep "the dots-only refusal is the folder sentence" "cannot name the folder its evidence files go in" "$CASE_TMP/run.log"
+
+  # product_name gets no exception: the intake refuses it, so this does too.
+  export VERGING_AGENT_SETUPS="staging-mcp"
+  export VERGING_PRODUCT_NAME="$documented"
+  run_step resolve_inputs.sh
+  check_exit "product_name is held to the display-name rule" 1 "$STEP_EXIT"
+  check_grep "the product_name refusal is the display-name one" "is not valid. Fix: use letters, digits, spaces" "$CASE_TMP/run.log"
+  unset VERGING_PRODUCT_NAME
+  end_case
+}
+
 case_held() {
   begin_case "held status keeps polling until the report is ready"
   local rid="run_20260815_186efbad9769"
@@ -1902,6 +2012,7 @@ case_multi_setup_newline_and_suite_scope
 case_multi_setup_display_names
 case_environment_missing_refused
 case_name_rules
+case_documented_integration_setup_name
 case_held
 case_activation_id
 case_activation_refusal

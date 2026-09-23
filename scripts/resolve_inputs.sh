@@ -65,20 +65,22 @@ fi
 # one name or several, a list separated by commas and/or newlines. One name is
 # a one-item list; several are tested together in one release (parity with the
 # API, whose `agent_setups` is an array). Each name follows the API's
-# display-name rule, so "Production Agent" is a name, not an error. Each also
-# becomes a directory in the report folder, so the slug it produces is checked
-# here rather than after a report has been built.
+# display-name rule, so "Production Agent" is a name, not an error, and a
+# setup Verging Labs set up as a documented integration keeps the
+# " (documented integration)" ending its name has in the account. Each name
+# also becomes a directory in the report folder, so the slug it produces is
+# checked here rather than after a report has been built.
 setup_list="${VERGING_AGENT_SETUPS:-}"
 
-# validate_setup_name NAME: the display-name rule plus the folder-name rule.
+# validate_setup_name NAME: the setup-name rule plus the folder-name rule.
 validate_setup_name() {
   local name="$1"
-  if ! safe_title_ok "$name"; then
-    echo "::error::agent setup '$name' is not valid. Fix: use letters, digits, spaces, dots, underscores, plus signs, and hyphens only; single spaces between words, none at the start or the end; up to 64 characters; it must not start with a hyphen."
+  if ! setup_name_ok "$name"; then
+    echo "::error::agent setup '$name' is not valid. Fix: use letters, digits, spaces, dots, underscores, plus signs, and hyphens only; single spaces between words, none at the start or the end; up to 64 characters; it must not start with a hyphen. If Verging Labs set this agent setup up as a documented integration, write its name exactly as your account has it, ending in ' (documented integration)'."
     return 1
   fi
   if ! safe_path_segment_ok "$(agent_setup_slug "$name")"; then
-    echo "::error::agent setup '$name' cannot name the folder its evidence files go in. Fix: give the agent setup a name that is not '.' or '..'."
+    echo "::error::agent setup '$name' cannot name the folder its evidence files go in. Fix: give the agent setup a name that is not made only of dots."
     return 1
   fi
 }

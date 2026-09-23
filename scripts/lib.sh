@@ -64,6 +64,15 @@ git_config_identity() {
 #   #472 D6 A). No leading or trailing space, no doubled space, still no
 #   leading hyphen, still 1 to 64 characters.
 #
+# On TOP of the display-name rule, and for an agent setup name only, the API
+# accepts one exception: a display name followed by the exact ending
+# " (documented integration)", which is how every agent setup Verging Labs
+# sets up as a documented integration is named. The whole name, ending
+# included, is still 1 to 64 characters, and the ending is accepted only at
+# the end and only once. product_name gets no such exception, because the API
+# gives it none: a name this action passed and the API then refused would be
+# the same refusal moved later in the job.
+#
 # The environment name becomes a directory: the API lowercases it and turns
 # spaces into hyphens to get the agent-setup slug that names the evidence
 # subdirectory. agent_setup_slug is that same transform, and every slug is
@@ -85,6 +94,26 @@ safe_title_ok() {
   printf '%s' "$name" | grep -Eq '^[A-Za-z0-9._+-]+( [A-Za-z0-9._+-]+)*$'
 }
 
+# The ending every documented integration agent setup's name carries, and the
+# ending its evidence folder therefore carries once the name is slugged.
+DOCUMENTED_SETUP_ENDING=" (documented integration)"
+DOCUMENTED_FOLDER_ENDING="-(documented-integration)"
+
+# documented_setup_name_ok NAME: true when NAME is a display name followed by
+# the documented integration ending, within the same 1 to 64 characters.
+documented_setup_name_ok() {
+  local name="$1"
+  case "$name" in *"$DOCUMENTED_SETUP_ENDING") ;; *) return 1 ;; esac
+  [ "${#name}" -le 64 ] || return 1
+  safe_title_ok "${name%"$DOCUMENTED_SETUP_ENDING"}"
+}
+
+# setup_name_ok NAME: the rule the API applies to an agent setup name, which
+# is the display-name rule plus that one exception and nothing else.
+setup_name_ok() {
+  safe_title_ok "$1" || documented_setup_name_ok "$1"
+}
+
 # agent_setup_slug NAME: the directory name the API derives from an
 # agent-setup name, character for character with the report renderer's
 # String(name).toLowerCase().replace(/ /g, "-").
@@ -97,18 +126,21 @@ agent_setup_slug() {
 # from widening what can be written: whatever a customer may type, the
 # segment it produces still cannot be this directory, its parent, or a path.
 #
-# "." and ".." are refused even though the API's name rule accepts them as
-# names: an agent setup named ".." would slug to ".." and name the parent
-# directory. A dot INSIDE a segment ("a..b") is an ordinary character and is
-# allowed, exactly as the API allows it.
+# A segment of nothing but dots is refused, however many dots it carries: "."
+# is this directory and ".." is its parent, and the API refuses a name of
+# nothing but dots for the same reason. A dot INSIDE a segment ("a..b") is an
+# ordinary character and is allowed, exactly as the API allows it. The one
+# ending a documented integration setup's folder carries is a folder name and
+# nothing more: it is accepted at the end of a segment, and only there.
 safe_path_segment_ok() {
   local seg="$1"
   case "$seg" in
-    ''|.|..) return 1 ;;
-    -*) return 1 ;;
-    */*) return 1 ;;
+    ''|-*|*/*) return 1 ;;
   esac
-  printf '%s' "$seg" | grep -Eq '^[A-Za-z0-9._+-]+$'
+  if printf '%s' "$seg" | grep -Eq '^\.+$'; then return 1; fi
+  local core="$seg"
+  case "$seg" in *"$DOCUMENTED_FOLDER_ENDING") core="${seg%"$DOCUMENTED_FOLDER_ENDING"}" ;; esac
+  printf '%s' "$core" | grep -Eq '^[A-Za-z0-9._+-]+$'
 }
 
 # evidence_name_ok NAME: true when NAME is a name the Verging Memory CI API

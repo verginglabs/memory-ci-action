@@ -450,8 +450,12 @@ case_documented_integration_setup_name() {
 
     # The folder the evidence files go in. The slug keeps the ending, and that
     # segment is one the action writes; a dots-only segment never is.
-    [ "$(agent_setup_slug "$documented")" = "hermes-gpt-5.6-luna-(documented-integration)" ] \
-      || { echo "SLUG WRONG: [$(agent_setup_slug "$documented")]"; fails=1; }
+    [ "$(agent_setup_slug "Production MCP (documented integration)")" = "production-mcp-(documented-integration)" ] \
+      || { echo "SLUG WRONG: [$(agent_setup_slug "Production MCP (documented integration)")]"; fails=1; }
+    case "$(agent_setup_slug "$documented")" in
+      *"-(documented-integration)") ;;
+      *) echo "SLUG WRONG: [$(agent_setup_slug "$documented")]"; fails=1 ;;
+    esac
     safe_path_segment_ok "$(agent_setup_slug "$documented")" \
       || { echo "SEGMENT SHOULD ACCEPT: [$(agent_setup_slug "$documented")]"; fails=1; }
     evidence_name_ok "evidence/$(agent_setup_slug "$documented")/cr1c07-2.31.0.md" \

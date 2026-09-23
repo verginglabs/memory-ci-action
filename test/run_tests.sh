@@ -460,6 +460,23 @@ case_documented_integration_setup_name() {
       safe_path_segment_ok "$bad" && { echo "SEGMENT SHOULD REFUSE: [$bad]"; fails=1; }
     done
     evidence_name_ok "evidence/.../x.md" && { echo "EV SHOULD REFUSE: dots-only folder"; fails=1; }
+
+    # That ending belongs to an agent setup's folder and nowhere else, and
+    # that folder is the setup's name lowercased, so it is never longer than
+    # the name and never carries a capital letter. A folder that carries the
+    # ending and is neither is not one the API delivers.
+    safe_path_segment_ok "$base39-(documented-integration)" \
+      || { echo "SEGMENT SHOULD ACCEPT: 64 characters ending in the folder ending"; fails=1; }
+    for bad in "A-(documented-integration)" "Production-MCP-(documented-integration)" \
+               "$base40-(documented-integration)"; do
+      safe_path_segment_ok "$bad" && { echo "SEGMENT SHOULD REFUSE: [$bad]"; fails=1; }
+    done
+    evidence_name_ok "evidence/A-(documented-integration)/cr1c07-2.31.0.md" \
+      && { echo "EV SHOULD REFUSE: a folder the API never delivers"; fails=1; }
+    # The evidence FILE keeps its own rule: a delivered version may carry
+    # capitals, and that has nothing to do with this ending.
+    evidence_name_ok "evidence/cr1c07-2.31.0-RC1.md" \
+      || { echo "EV SHOULD ACCEPT: a version with capitals"; fails=1; }
     exit "$fails"
   ) > "$CASE_TMP/documented.log" 2>&1
   if [ "$?" = "0" ]; then

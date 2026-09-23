@@ -129,18 +129,27 @@ agent_setup_slug() {
 # A segment of nothing but dots is refused, however many dots it carries: "."
 # is this directory and ".." is its parent, and the API refuses a name of
 # nothing but dots for the same reason. A dot INSIDE a segment ("a..b") is an
-# ordinary character and is allowed, exactly as the API allows it. The one
-# ending a documented integration setup's folder carries is a folder name and
-# nothing more: it is accepted at the end of a segment, and only there.
+# ordinary character and is allowed, exactly as the API allows it.
+#
+# The ending a documented integration setup's folder carries is accepted at
+# the end of a segment and only there, and only on a segment that folder can
+# actually be: the API makes it by lowercasing the setup's name, so it never
+# carries a capital and is never longer than the name's 64 characters. Every
+# other segment, an evidence file name among them, keeps the rule it had.
 safe_path_segment_ok() {
   local seg="$1"
   case "$seg" in
     ''|-*|*/*) return 1 ;;
   esac
   if printf '%s' "$seg" | grep -Eq '^\.+$'; then return 1; fi
-  local core="$seg"
-  case "$seg" in *"$DOCUMENTED_FOLDER_ENDING") core="${seg%"$DOCUMENTED_FOLDER_ENDING"}" ;; esac
-  printf '%s' "$core" | grep -Eq '^[A-Za-z0-9._+-]+$'
+  case "$seg" in
+    *"$DOCUMENTED_FOLDER_ENDING")
+      [ "${#seg}" -le 64 ] || return 1
+      printf '%s' "${seg%"$DOCUMENTED_FOLDER_ENDING"}" | grep -Eq '^[a-z0-9._+-]+$'
+      return
+      ;;
+  esac
+  printf '%s' "$seg" | grep -Eq '^[A-Za-z0-9._+-]+$'
 }
 
 # evidence_name_ok NAME: true when NAME is a name the Verging Memory CI API

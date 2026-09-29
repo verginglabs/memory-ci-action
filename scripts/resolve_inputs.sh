@@ -73,11 +73,11 @@ setup_list="${VERGING_AGENT_SETUPS:-}"
 # validate_setup_name NAME: the display-name rule plus the folder-name rule.
 validate_setup_name() {
   local name="$1"
-  if ! safe_title_ok "$name"; then
+  if ! safe_title_ok "$name" && ! safe_documented_setup_name_ok "$name"; then
     echo "::error::agent setup '$name' is not valid. Fix: use letters, digits, spaces, dots, underscores, plus signs, and hyphens only; single spaces between words, none at the start or the end; up to 64 characters; it must not start with a hyphen."
     return 1
   fi
-  if ! safe_path_segment_ok "$(agent_setup_slug "$name")"; then
+  if ! safe_agent_setup_slug_ok "$(agent_setup_slug "$name")"; then
     echo "::error::agent setup '$name' cannot name the folder its evidence files go in. Fix: give the agent setup a name that is not '.' or '..'."
     return 1
   fi

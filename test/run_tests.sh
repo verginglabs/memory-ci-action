@@ -1249,6 +1249,13 @@ case_multi_setup_display_names() {
   local posted; posted="$(posted_body)"
   check_eq "display names travel verbatim in the array" '["Production MCP","Agent SDK"]' "$(printf '%s' "$posted" | jq -c '.agent_setups')"
 
+  # The harness accepts this exact setup-series suffix on declared names.
+  export VERGING_AGENT_SETUPS='Claude Code Opus 5 test I (documented integration)'
+  run_step resolve_inputs.sh; check_exit "documented integration setup name is accepted" 0 "$STEP_EXIT"
+  check_eq "documented setup travels verbatim" '["Claude Code Opus 5 test I (documented integration)"]' "$(cat "$RUNNER_TEMP/verging-memory-ci-state/agent_setups_json")"
+  export VERGING_AGENT_SETUPS='Claude Code Opus 5 test I (other integration)'
+  run_step resolve_inputs.sh; check_exit "other parenthesized suffix is refused" 1 "$STEP_EXIT"
+
   # A bad name in the list is refused; the comma itself is never the problem.
   export VERGING_AGENT_SETUPS="staging-mcp,bad name!"
   run_step resolve_inputs.sh; check_exit "a bad name in the list is refused" 1 "$STEP_EXIT"

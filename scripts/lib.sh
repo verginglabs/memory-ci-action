@@ -85,6 +85,15 @@ safe_title_ok() {
   printf '%s' "$name" | grep -Eq '^[A-Za-z0-9._+-]+( [A-Za-z0-9._+-]+)*$'
 }
 
+# The harness reserves this one literal suffix for documented setup series.
+safe_documented_setup_name_ok() {
+  local name="$1" suffix=' (documented integration)' base
+  [ "${#name}" -le 64 ] || return 1
+  [[ "$name" == *"$suffix" ]] || return 1
+  base="${name%"$suffix"}"
+  safe_title_ok "$base"
+}
+
 # agent_setup_slug NAME: the directory name the API derives from an
 # agent-setup name, character for character with the report renderer's
 # String(name).toLowerCase().replace(/ /g, "-").
@@ -111,6 +120,14 @@ safe_path_segment_ok() {
   printf '%s' "$seg" | grep -Eq '^[A-Za-z0-9._+-]+$'
 }
 
+safe_agent_setup_slug_ok() {
+  local slug="$1" suffix='-(documented-integration)' base
+  if safe_path_segment_ok "$slug"; then return 0; fi
+  [[ "$slug" == *"$suffix" ]] || return 1
+  base="${slug%"$suffix"}"
+  safe_path_segment_ok "$base"
+}
+
 # evidence_name_ok NAME: true when NAME is a name the Verging Memory CI API
 # emits for an evidence file, and nothing else.
 #
@@ -135,7 +152,7 @@ evidence_name_ok() {
     */*) seg="${rest%%/*}"; file="${rest#*/}"; [ -n "$seg" ] || return 1 ;;
     *) seg=""; file="$rest" ;;
   esac
-  if [ -n "$seg" ]; then safe_path_segment_ok "$seg" || return 1; fi
+  if [ -n "$seg" ]; then safe_agent_setup_slug_ok "$seg" || return 1; fi
   case "$file" in *.md) ;; *) return 1 ;; esac
   safe_path_segment_ok "$file"
 }

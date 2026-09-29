@@ -102,6 +102,19 @@ by the next job on any push, or by the sync workflow below, once it is ready.
 To have the report land on the same job, raise `poll_timeout_minutes`; a
 waiting job spends Actions minutes.
 
+## Retries and re-runs
+
+A re-run of the same workflow run (GitHub's "Re-run job", or a re-run of a
+failed attempt) reuses the release that run already submitted and is not
+charged twice: the Action submits every release under an `Idempotency-Key`
+made of the repository, the commit SHA and the workflow run id, and the API
+answers a repeat with the same release. A new commit, or a new workflow run
+of the same commit (a second `workflow_dispatch`, say), is a new release. If
+the inputs changed since the run first submitted (other agent setups, suites,
+`vendor_version` or `product_name`), the re-run fails before anything is billed
+and says so; push a new commit or start a new workflow run. To submit under a
+key of your own, set the input `idempotency_key`.
+
 ## Reports that land later
 
 Two kinds of report land after the job that submitted the release: the

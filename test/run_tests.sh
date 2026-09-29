@@ -114,6 +114,7 @@ setup_env() {
   export GITHUB_EVENT_NAME="push"
   export GITHUB_REF_NAME="main"
   export GITHUB_SHA="1111111111111111111111111111111111111111"
+  export GITHUB_RUN_ID="4242"
   unset GITHUB_HEAD_REF GITHUB_EVENT_PATH GITHUB_WORKSPACE 2>/dev/null
   export GH_SHIM_LOG="$CASE_TMP/gh.log"
   : > "$GH_SHIM_LOG"
@@ -127,7 +128,7 @@ setup_env() {
   unset VERGING_VENDOR_VERSION VERGING_ENDPOINT VERGING_FOLDER 2>/dev/null
   unset VERGING_PRODUCT_NAME VERGING_FETCH_ONLY_RELEASE_ID VERGING_POLL_TIMEOUT_MINUTES VERGING_MODE VERGING_LEGACY_ENVIRONMENTS 2>/dev/null
   unset VERGING_ACTIVATION_ID 2>/dev/null
-  unset VERGING_DEFAULT_BRANCH VERGING_FALLBACK_PULL_REQUEST GH_PR_LIST_OUTPUT GH_COMMENTS_OUTPUT GH_SHIM_FAIL 2>/dev/null
+  unset VERGING_DEFAULT_BRANCH VERGING_FALLBACK_PULL_REQUEST GH_PR_LIST_OUTPUT GH_COMMENTS_OUTPUT GH_SHIM_FAIL VERGING_IDEMPOTENCY_KEY 2>/dev/null
 }
 
 make_repos() {
@@ -646,6 +647,92 @@ case_other_409_fails() {
   end_case
 }
 
+posted_header() { # $1 index of the POST to /v1/releases, $2 header name (lower case): its value, or "null"
+  jq -rs --argjson i "$1" --arg h "$2" '[.[] | select(.method == "POST")][$i].headers[$h]' "$MOCK_DIR/requests.log"
+}
+
+case_idempotency_key() {
+  begin_case "every submission carries an Idempotency-Key: repository:sha:run_id, the wiring check under a :wiring suffix, the input verbatim, none outside a GitHub job, a reused key with changed inputs fails plainly"
+  local rid="run_20260815_186efbad9769" wid="run_20260825_0a1b2c3d4e5f"
+  local expected="acme/widget:1111111111111111111111111111111111111111:4242"
+  # 1. The normal submission: the key names the workflow run.
+  start_mock "$(happy_scenario "$rid")" || { end_case; return; }
+  setup_env
+  make_repos
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  run_step reconcile.sh
+  run_step run_release.sh;     check_exit "run_release exits 0" 0 "$STEP_EXIT"
+  check_eq "the release POST carries Idempotency-Key repository:sha:run_id" "$expected" "$(posted_header 0 idempotency-key)"
+  check_grep "the log names the key and what it buys" "Idempotency-Key: $expected (a re-run of this workflow run reuses the release" "$CASE_TMP/run.log"
+  check_grep "the receipt line says the re-run reuses this release" "a re-run of this workflow run reuses release $rid" "$CASE_TMP/run.log"
+  check_no_grep "no missing-key line inside a GitHub job" "No Idempotency-Key is sent" "$CASE_TMP/run.log"
+  check_grep "action.yml declares the idempotency_key input" "idempotency_key:" "$ROOT/action.yml"
+  check_grep "the README explains re-runs" "## Retries and re-runs" "$ROOT/README.md"
+
+  # 2. A reused receipt (the API answering a re-run with the release it
+  # already accepted, status beyond queued) is handled like a fresh one.
+  set_scenario "$(happy_scenario "$rid" | jq '.receipt.status = "running"')"
+  run_step run_release.sh;     check_exit "a reused 202 receipt proceeds like a fresh one" 0 "$STEP_EXIT"
+  check_grep "the reused receipt's status is echoed" "status:         running" "$CASE_TMP/run.log"
+  check_file "the report is written from the reused release" "$WORKSPACE/$FOLDER/releases/2026-08-15-2.31.0/REPORT.md"
+
+  # 3. The not_set_up fallback: the release under the key, the wiring check
+  # under the key with the :wiring suffix.
+  set_scenario "$(wiring_scenario "$wid" | jq --argjson r "$not_set_up_receipt" '.receipt_code = 409 | .receipt = $r')"
+  run_step run_release.sh;     check_exit "run_release exits 0 on the not_set_up 409" 0 "$STEP_EXIT"
+  check_eq "two requests: the release, then the wiring check" "2" "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
+  check_eq "the release POST carries the run's key" "$expected" "$(posted_header 0 idempotency-key)"
+  check_eq "the wiring check POST carries the key with the :wiring suffix" "$expected:wiring" "$(posted_header 1 idempotency-key)"
+
+  # 4. The wiring_check input: the :wiring suffix too.
+  set_scenario "$(wiring_scenario "$wid")"
+  export VERGING_WIRING_CHECK="true"
+  run_step resolve_inputs.sh
+  run_step run_release.sh;     check_exit "the wiring check input exits 0" 0 "$STEP_EXIT"
+  check_eq "the wiring check POST carries the key with the :wiring suffix" "$expected:wiring" "$(posted_header 0 idempotency-key)"
+  unset VERGING_WIRING_CHECK
+
+  # 5. The idempotency_key input is sent verbatim, and with the suffix on the
+  # wiring check.
+  set_scenario "$(wiring_scenario "$wid" | jq --argjson r "$not_set_up_receipt" '.receipt_code = 409 | .receipt = $r')"
+  export VERGING_IDEMPOTENCY_KEY="deploy-7 of acme"
+  run_step resolve_inputs.sh;  check_exit "resolve_inputs accepts the input" 0 "$STEP_EXIT"
+  run_step run_release.sh;     check_exit "run_release exits 0 with the input" 0 "$STEP_EXIT"
+  check_eq "the release POST carries the input verbatim" "deploy-7 of acme" "$(posted_header 0 idempotency-key)"
+  check_eq "the wiring check POST carries the input with the :wiring suffix" "deploy-7 of acme:wiring" "$(posted_header 1 idempotency-key)"
+  check_grep "the log says the key came from the input" "Idempotency-Key from the idempotency_key input." "$CASE_TMP/run.log"
+
+  # 6. A value the API would refuse (over 255 characters) is sent as its
+  # SHA-256 digest, so the header always fits the API's rule.
+  set_scenario "$(happy_scenario "$rid")"
+  local long; long="$(printf 'k%.0s' $(seq 1 300))"
+  export VERGING_IDEMPOTENCY_KEY="$long"
+  run_step resolve_inputs.sh
+  run_step run_release.sh;     check_exit "run_release exits 0 with a long input" 0 "$STEP_EXIT"
+  check_eq "a key over 255 characters is sent as sha256:<digest>" "sha256:$(printf '%s' "$long" | sha256sum | cut -c1-64)" "$(posted_header 0 idempotency-key)"
+  check_eq "the digest key is 71 characters" "71" "$(posted_header 0 idempotency-key | tr -d '\n' | wc -c | tr -d ' ')"
+  unset VERGING_IDEMPOTENCY_KEY
+
+  # 7. Outside a GitHub job (no run id) no header is sent, and the log says so.
+  set_scenario "$(happy_scenario "$rid")"
+  run_step resolve_inputs.sh
+  ( unset GITHUB_RUN_ID; run_step run_release.sh; exit "$STEP_EXIT" ); check_exit "run_release exits 0 without a run id" 0 "$?"
+  check_eq "no Idempotency-Key header without GITHUB_RUN_ID" "null" "$(posted_header 0 idempotency-key)"
+  check_grep "the log says why no key is sent" "No Idempotency-Key is sent: GITHUB_REPOSITORY, GITHUB_SHA or GITHUB_RUN_ID is empty" "$CASE_TMP/run.log"
+
+  # 8. The same key with changed inputs: the API's 409 fails the job with the
+  # plain message, nothing else is submitted, no wiring check.
+  set_scenario "$(wiring_scenario "$wid" | jq '.receipt_code = 409 | .receipt = {error: "this Idempotency-Key was already used for a different release", fix: "an Idempotency-Key binds to the exact release it first accepted; send a NEW key for a changed submission, or resend the original submission unchanged to retry it"}')"
+  run_step run_release.sh;     check_exit "a reused key with changed inputs fails the job" 1 "$STEP_EXIT"
+  check_eq "nothing else was submitted (no wiring check)" "1" "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
+  check_grep "the error says the inputs changed for an already-submitted run" "::error::the workflow inputs changed for an already-submitted run: this workflow run already submitted the release under the Idempotency-Key $expected with different inputs" "$CASE_TMP/run.log"
+  check_grep "the error says what to do" "Push a new commit, or start a new workflow run, to submit the changed release." "$CASE_TMP/run.log"
+  check_grep "the API's own text is shown" "this Idempotency-Key was already used for a different release" "$CASE_TMP/run.log"
+  check_grep "the job summary says the release was not accepted" "release not accepted" "$GITHUB_STEP_SUMMARY"
+  check_no_grep "no notice" "::notice::" "$CASE_TMP/run.log"
+  end_case
+}
+
 seed_preliminary_release() { # $1 release id; seeds and pushes a preliminary report
   local rid="$1" dir="$WORKSPACE/$FOLDER/releases/2026-08-14-2.30.0"
   mkdir -p "$dir/evidence"
@@ -789,6 +876,191 @@ case_push_retry() {
   check_grep "the push landed after the rebase" "Report commit pushed to main." "$CASE_TMP/run.log"
   check_grep "origin main has the report commit" "Verging Memory CI: report for 2.31.0" <(git -C "$ORIGIN" log --format=%s main)
   check_grep "origin main kept the other commit" "other work landed while the release ran" <(git -C "$ORIGIN" log --format=%s main)
+  end_case
+}
+
+# ---------- a re-run finds its report already committed ----------
+
+# rerun_from SHA: the next job is a re-run of the same workflow run: same
+# repository, sha and run id, so the same Idempotency-Key, and a checkout at
+# SHA (the commit before the earlier attempt's report commit). The local
+# origin/main ref is dropped so only a real fetch can reveal that commit.
+rerun_from() {
+  git -C "$WORKSPACE" reset -q --hard "$1"
+  git -C "$WORKSPACE" update-ref -d refs/remotes/origin/main
+  new_job
+}
+
+case_rerun_report_already_committed() {
+  begin_case "a re-run whose earlier attempt committed the report finds it on the branch, pushes nothing, and ends with the same outputs"
+  local rid="run_20260815_186efbad9769" wid="run_20260825_0a1b2c3d4e5f" before after
+  start_mock "$(happy_scenario "$rid")" || { end_case; return; }
+  setup_env
+  make_repos
+  before="$(git -C "$WORKSPACE" rev-parse HEAD)"
+
+  # Attempt 1: the report is committed and pushed.
+  run_step resolve_inputs.sh
+  run_step reconcile.sh
+  run_step run_release.sh;     check_exit "attempt 1: run_release exits 0" 0 "$STEP_EXIT"
+  run_step commit_push.sh;     check_exit "attempt 1: commit_push exits 0" 0 "$STEP_EXIT"
+  run_step surfaces.sh
+  run_step set_outputs.sh
+  after="$(git -C "$ORIGIN" rev-parse main)"
+  check_eq "attempt 1 pushed the report commit" "2" "$(git -C "$ORIGIN" rev-list --count main)"
+  cp "$GITHUB_OUTPUT" "$CASE_TMP/outputs-attempt-1"
+
+  # Attempt 2: the checkout is the commit before that report commit, the API
+  # answers the same key with the same release, the report is written again.
+  rerun_from "$before"
+  run_step resolve_inputs.sh
+  run_step reconcile.sh;       check_exit "attempt 2: reconcile exits 0" 0 "$STEP_EXIT"
+  check_grep "attempt 2: the checkout has no reports to reconcile" "No earlier reports to reconcile" "$CASE_TMP/run.log"
+  run_step run_release.sh;     check_exit "attempt 2: run_release exits 0" 0 "$STEP_EXIT"
+  check_eq "attempt 2 sent the same Idempotency-Key" "acme/widget:1111111111111111111111111111111111111111:4242" "$(posted_header 0 idempotency-key)"
+  check_grep "attempt 2 got the verdict at once" "Release verdict: Ready" "$CASE_TMP/run.log"
+  run_step commit_push.sh;     check_exit "attempt 2: commit_push exits 0" 0 "$STEP_EXIT"
+  check_grep "the log says the report is already committed" "This release's report is already committed by an earlier attempt of this workflow run; nothing to push." "$CASE_TMP/run.log"
+  check_grep "the checkout was moved up to the branch" "The checkout is moved up to origin/main, which carries the report for release $rid at $FOLDER/releases/2026-08-15-2.31.0." "$CASE_TMP/run.log"
+  check_no_grep "no push was attempted" "Push attempt" "$CASE_TMP/run.log"
+  check_no_grep "no conflict" "CONFLICT" "$CASE_TMP/run.log"
+  check_no_grep "no error" "::error::" "$CASE_TMP/run.log"
+  check_eq "origin main is unchanged" "$after" "$(git -C "$ORIGIN" rev-parse main)"
+  check_eq "origin main still has one report commit" "2" "$(git -C "$ORIGIN" rev-list --count main)"
+  check_eq "the checkout is at the branch's tip" "$after" "$(git -C "$WORKSPACE" rev-parse HEAD)"
+  check_eq "the checkout is clean" "" "$(git -C "$WORKSPACE" status --porcelain)"
+  check_eq "the push path is recorded" "already-committed" "$(cat "$RUNNER_TEMP/verging-memory-ci-state/push_path")"
+  check_grep "the job summary says so" "is already committed on \`main\` by an earlier attempt of this workflow run" "$GITHUB_STEP_SUMMARY"
+  run_step surfaces.sh;        check_exit "attempt 2: surfaces exits 0" 0 "$STEP_EXIT"
+  check_grep "the check run is posted again" "check-runs" "$GH_SHIM_LOG"
+  check_grep "with the verdict's conclusion" "conclusion=success" "$GH_SHIM_LOG"
+  run_step set_outputs.sh;     check_exit "attempt 2: set_outputs exits 0" 0 "$STEP_EXIT"
+  if cmp -s "$GITHUB_OUTPUT" "$CASE_TMP/outputs-attempt-1"; then
+    say "    ok: attempt 2 ends with the same outputs as attempt 1"
+  else
+    note_fail "attempt 2's outputs differ from attempt 1's: $(tr '\n' ' ' < "$GITHUB_OUTPUT")"
+  fi
+  check_grep "output verdict" "verdict=Ready" "$GITHUB_OUTPUT"
+  check_grep "output report_path" "report_path=$FOLDER/releases/2026-08-15-2.31.0/REPORT.md" "$GITHUB_OUTPUT"
+
+  # The wiring check goes the same way: its page is found by the release id
+  # in its release.json.
+  set_scenario "$(wiring_scenario "$wid")"
+  export VERGING_WIRING_CHECK="true"
+  before="$(git -C "$WORKSPACE" rev-parse HEAD)"
+  new_job
+  run_step resolve_inputs.sh
+  run_step reconcile.sh
+  run_step run_release.sh;     check_exit "wiring attempt 1: run_release exits 0" 0 "$STEP_EXIT"
+  run_step commit_push.sh;     check_exit "wiring attempt 1: commit_push exits 0" 0 "$STEP_EXIT"
+  after="$(git -C "$ORIGIN" rev-parse main)"
+  check_eq "the wiring page was pushed" "3" "$(git -C "$ORIGIN" rev-list --count main)"
+  rerun_from "$before"
+  run_step resolve_inputs.sh
+  run_step reconcile.sh
+  run_step run_release.sh;     check_exit "wiring attempt 2: run_release exits 0" 0 "$STEP_EXIT"
+  run_step commit_push.sh;     check_exit "wiring attempt 2: commit_push exits 0" 0 "$STEP_EXIT"
+  check_grep "the wiring page is found already committed" "This release's report is already committed by an earlier attempt of this workflow run; nothing to push." "$CASE_TMP/run.log"
+  check_eq "origin main is unchanged" "$after" "$(git -C "$ORIGIN" rev-parse main)"
+  run_step surfaces.sh
+  run_step set_outputs.sh;     check_exit "wiring attempt 2: set_outputs exits 0" 0 "$STEP_EXIT"
+  check_grep "output verdict is Wiring check" "verdict=Wiring check" "$GITHUB_OUTPUT"
+  check_grep "output report_path is the committed page" "report_path=$FOLDER/releases/2026-08-25-2.31.0-wiring-check/REPORT.md" "$GITHUB_OUTPUT"
+  check_grep "the closing notice still names the input" "::notice::wiring_check is true" "$CASE_TMP/run.log"
+  unset VERGING_WIRING_CHECK
+  end_case
+}
+
+case_rerun_diverged_checkout_conflict() {
+  begin_case "a re-run whose checkout has diverged from the branch commits its copy; the rebase conflict on the same release resolves to the branch's copy and the job stays green"
+  local rid="run_20260815_186efbad9769" before after
+  start_mock "$(happy_scenario "$rid")" || { end_case; return; }
+  setup_env
+  make_repos
+  before="$(git -C "$WORKSPACE" rev-parse HEAD)"
+  run_step resolve_inputs.sh
+  run_step reconcile.sh
+  run_step run_release.sh
+  run_step commit_push.sh;     check_exit "attempt 1: commit_push exits 0" 0 "$STEP_EXIT"
+  after="$(git -C "$ORIGIN" rev-parse main)"
+
+  # Attempt 2 runs from a checkout that is not an ancestor of the branch (a
+  # pull request's merge checkout is the everyday shape), and the API now
+  # serves the final report, so its copy differs from the branch's.
+  rerun_from "$before"
+  (
+    cd "$WORKSPACE"
+    printf 'a commit the branch does not have\n' > local.txt
+    git add local.txt
+    git commit -qm "local commit the branch does not have"
+  )
+  set_scenario "$(happy_scenario "$rid" | jq '.report.diff.stage = "final"')"
+  run_step resolve_inputs.sh
+  run_step reconcile.sh
+  run_step run_release.sh;     check_exit "attempt 2: run_release exits 0" 0 "$STEP_EXIT"
+  run_step commit_push.sh;     check_exit "attempt 2: commit_push exits 0: the job stays green" 0 "$STEP_EXIT"
+  check_grep "the log says the checkout could not be moved up" "but the checkout cannot be moved up to it (they have diverged)" "$CASE_TMP/run.log"
+  check_grep "the first push was refused" "Push attempt 1 to main failed" "$CASE_TMP/run.log"
+  check_grep "the rebase conflicted on the report files" "CONFLICT" "$CASE_TMP/run.log"
+  check_grep "the conflict is resolved from the branch" "The rebase on origin/main conflicts inside $FOLDER; the branch's version of every conflicting file is taken:" "$CASE_TMP/run.log"
+  check_grep "the same release's index row stays as the branch has it" "the index row for $rid stays as the branch has it" "$CASE_TMP/run.log"
+  check_grep "the emptied commit is skipped" "The branch already carries everything this commit brings; skipping it." "$CASE_TMP/run.log"
+  check_grep "the push then lands" "Report commit pushed to main." "$CASE_TMP/run.log"
+  check_no_grep "no error" "::error::" "$CASE_TMP/run.log"
+  check_no_grep "no refusal" "could not be pushed" "$CASE_TMP/run.log"
+  check_eq "origin main has exactly one report commit" "1" "$(git -C "$ORIGIN" log --format=%s main | grep -c 'Verging Memory CI: report for 2.31.0')"
+  check_grep "origin main carries attempt 1's report commit" "$after" <(git -C "$ORIGIN" rev-list main)
+  check_grep "origin main carries the local commit too" "local commit the branch does not have" <(git -C "$ORIGIN" log --format=%s main)
+  check_eq "the branch's copy of the report stands (preliminary, attempt 1's)" "preliminary" \
+    "$(git -C "$ORIGIN" show "main:$FOLDER/releases/2026-08-15-2.31.0/diff.json" | jq -r '.stage')"
+  check_eq "one index row for the release" "1" "$(git -C "$ORIGIN" show "main:$FOLDER/releases/index.md" | grep -cF "[$rid](")"
+  check_grep "the index row is the branch's" "[$rid](2026-08-15-2.31.0/REPORT.md) | Ready | preliminary |" <(git -C "$ORIGIN" show "main:$FOLDER/releases/index.md")
+  check_eq "the checkout is clean" "" "$(git -C "$WORKSPACE" status --porcelain)"
+  run_step surfaces.sh
+  run_step set_outputs.sh;     check_exit "attempt 2: set_outputs exits 0" 0 "$STEP_EXIT"
+  check_grep "output verdict" "verdict=Ready" "$GITHUB_OUTPUT"
+  check_grep "output report_path" "report_path=$FOLDER/releases/2026-08-15-2.31.0/REPORT.md" "$GITHUB_OUTPUT"
+  end_case
+}
+
+case_concurrent_release_conflict() {
+  begin_case "two jobs race on the index: the conflict is resolved from the branch and the second job's row, directory and latest/ are put back"
+  local rid_a="run_20260815_186efbad9769" rid_b="run_20260815_bbbbbbbbbbbb" before
+  start_mock "$(happy_scenario "$rid_a")" || { end_case; return; }
+  setup_env
+  make_repos
+  before="$(git -C "$WORKSPACE" rev-parse HEAD)"
+  run_step resolve_inputs.sh
+  run_step reconcile.sh
+  run_step run_release.sh
+  run_step commit_push.sh;     check_exit "job A: commit_push exits 0" 0 "$STEP_EXIT"
+
+  # Job B started from the same commit before job A's report landed, and
+  # tests another version.
+  rerun_from "$before"
+  export GITHUB_RUN_ID="4343"
+  export VERGING_VENDOR_VERSION="2.32.0"
+  set_scenario "$(happy_scenario "$rid_b" | jq '.report.vendor_version = "2.32.0"')"
+  run_step resolve_inputs.sh
+  run_step reconcile.sh
+  run_step run_release.sh;     check_exit "job B: run_release exits 0" 0 "$STEP_EXIT"
+  run_step commit_push.sh;     check_exit "job B: commit_push exits 0" 0 "$STEP_EXIT"
+  check_grep "job B's release was not found on the branch, so it was committed" "Verging Memory CI: report for 2.32.0 ($rid_b): Ready [skip ci]" <(git -C "$ORIGIN" log --format=%s main)
+  check_grep "the rebase conflicted on the index" "CONFLICT" "$CASE_TMP/run.log"
+  check_grep "the conflict is resolved from the branch" "the branch's version of every conflicting file is taken:" "$CASE_TMP/run.log"
+  check_grep "job B's row is put back" "the index row for $rid_b is put back" "$CASE_TMP/run.log"
+  check_grep "latest/ follows job B's release" "latest/ is refreshed from this job's release, the newest on record" "$CASE_TMP/run.log"
+  check_grep "the push then lands" "Report commit pushed to main." "$CASE_TMP/run.log"
+  check_no_grep "no error" "::error::" "$CASE_TMP/run.log"
+  check_grep "the index keeps job A's row" "[$rid_a](2026-08-15-2.31.0/REPORT.md) | Ready | preliminary |" <(git -C "$ORIGIN" show "main:$FOLDER/releases/index.md")
+  check_grep "the index gained job B's row" "[$rid_b](2026-08-15-2.32.0/REPORT.md) | Ready | preliminary |" <(git -C "$ORIGIN" show "main:$FOLDER/releases/index.md")
+  check_eq "two rows, no duplicates" "2" "$(git -C "$ORIGIN" show "main:$FOLDER/releases/index.md" | grep -c '^| 2026-')"
+  check_eq "job A's directory is on the branch" "$rid_a" "$(git -C "$ORIGIN" show "main:$FOLDER/releases/2026-08-15-2.31.0/release.json" | jq -r '.release_id')"
+  check_eq "job B's directory is on the branch" "$rid_b" "$(git -C "$ORIGIN" show "main:$FOLDER/releases/2026-08-15-2.32.0/release.json" | jq -r '.release_id')"
+  check_eq "latest/ is job B's release" "$rid_b" "$(git -C "$ORIGIN" show "main:$FOLDER/latest/release.json" | jq -r '.release_id')"
+  check_no_path "no pending record is left" "$WORKSPACE/$FOLDER/releases/pending.json"
+  check_eq "the checkout is clean" "" "$(git -C "$WORKSPACE" status --porcelain)"
+  unset VERGING_VENDOR_VERSION
   end_case
 }
 
@@ -1616,6 +1888,7 @@ case_onboarding_activation() {
   run_step run_release.sh; check_exit "onboarding reaches its report" 0 "$STEP_EXIT"
   run_step commit_push.sh; check_exit "onboarding report is committed" 0 "$STEP_EXIT"
   check_eq "POST carries the used id" "$used" "$(jq -r 'select(.method == "POST") | .body | fromjson | .activation_id' "$MOCK_DIR/requests.log")"
+  check_eq "activation POST carries the workflow run Idempotency-Key" "acme/widget:1111111111111111111111111111111111111111:4242" "$(posted_header 0 idempotency-key)"
   check_grep "used id shown" "Activation id used: $used" "$CASE_TMP/run.log"
   check_grep "next id shown separately" "Next activation id: $next" "$CASE_TMP/run.log"
   check_eq "polls through held and running" "3" "$(cat "$MOCK_DIR/status-$rid.count")"
@@ -1720,6 +1993,7 @@ case_fetch_only
 case_wiring_check_input
 case_not_set_up_fallback
 case_other_409_fails
+case_idempotency_key
 case_evidence_paths
 case_reconcile
 case_sync_mode
@@ -1729,6 +2003,9 @@ case_fetch_only_pending
 case_pending_after_fetch_failure
 case_pending_older_than_latest
 case_push_retry
+case_rerun_report_already_committed
+case_rerun_diverged_checkout_conflict
+case_concurrent_release_conflict
 case_push_refused
 case_reconcile_push_refused
 case_fallback_pull_request_opt_in

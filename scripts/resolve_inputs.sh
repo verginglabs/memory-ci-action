@@ -102,6 +102,13 @@ state_set folder "${VERGING_FOLDER:-Verging Memory CI}"
 state_set agent_setups_json "$agent_setups_json"
 state_set fetch_only "${VERGING_FETCH_ONLY_RELEASE_ID:-}"
 
+activation_id="${VERGING_ACTIVATION_ID:-}"
+if [ -n "$activation_id" ] && ! printf '%s' "$activation_id" | grep -Eq '^act_[23456789abcdefghjkmnpqrstuvwxyz]{7}$'; then
+  echo "::error::activation_id is not a valid activation id; use the exact id from your setup or report"
+  exit 1
+fi
+state_set activation_id "$activation_id"
+
 # wiring_check: "true" performs the free wiring check instead of a release.
 # Its page is committed exactly like a report; nothing is tested and nothing
 # is billed. It cannot be combined with fetch_only_release_id, which submits

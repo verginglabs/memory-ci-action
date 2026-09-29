@@ -78,6 +78,7 @@ for id in $(pending_ids "$folder"); do
 
   case "$status" in
     report_ready|corrected)
+      print_held_onboarding_copy "$status_file" || true
       echo "The report for $id is ready (status: $status); fetching it."
       # latest/ stays with a newer release whose report is already on record.
       latest_mode=""
@@ -118,7 +119,10 @@ for id in $(pending_ids "$folder"); do
       ;;
     failed)
       failure="$(jq -r '.failure // "(no failure field on the status body)"' "$status_file")"
-      echo "::warning::release $id ($version) failed on the Verging side: $failure. The release is voided; voided tests are never billed. Start a new release, or send the release_id to contact@verginglabs.com."
+      echo "::warning::release $id ($version) failed on the Verging side: $failure."
+      if ! print_held_onboarding_copy "$status_file"; then
+        echo "The release is voided; voided tests are never billed. Start a new release, or send the release_id to contact@verginglabs.com."
+      fi
       row_failure="$(printf '%s' "$failure" | tr '\n|' ' /')"
       index_put_row "$folder" "$id" "| $release_date | $version | $id | Failed: $row_failure | failed |"
       pending_clear "$folder" "$id"
@@ -126,7 +130,10 @@ for id in $(pending_ids "$folder"); do
       {
         echo "**Release \`$id\` ($version) failed on the Verging side.** $failure"
         echo
-        echo "The failure is on its row in \`$releases_dir/index.md\`; the release is no longer pending. The release is voided; voided tests are never billed."
+        echo "The failure is on its row in \`$releases_dir/index.md\`; the release is no longer pending."
+        if print_held_onboarding_copy "$status_file"; then :; else
+          echo "The release is voided; voided tests are never billed."
+        fi
         echo
       } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
       if commit_folder "Verging Memory CI: release $version ($id) failed on the Verging side"; then

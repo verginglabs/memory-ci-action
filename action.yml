@@ -13,6 +13,10 @@ inputs:
     description: "The agent setup(s) to test, as you named them at onboarding. One name or several, separated with commas and/or newlines. Omit to use the account defaults."
     required: false
     default: ""
+  activation_id:
+    description: "Activation id from your setup or previous report. Use it to start onboarding or set up new test suites. Leave empty to use the current setup for a delivered agent setup."
+    required: false
+    default: ""
   environments:
     description: "Removed. Use agent_setups. If this legacy input is present, the Action stops with a migration error."
     required: false
@@ -77,6 +81,7 @@ runs:
       env:
         VERGING_API_KEY: ${{ inputs.api_key }}
         VERGING_AGENT_SETUPS: ${{ inputs.agent_setups }}
+        VERGING_ACTIVATION_ID: ${{ inputs.activation_id }}
         VERGING_LEGACY_ENVIRONMENTS: ${{ inputs.environments }}
         VERGING_SUITES: ${{ inputs.suites }}
         VERGING_VENDOR_VERSION: ${{ inputs.vendor_version }}

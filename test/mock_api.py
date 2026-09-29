@@ -74,6 +74,14 @@ class Handler(BaseHTTPRequestHandler):
         self._record(body)
         sc = load_scenario()
         if self.path == "/v1/releases":
+            if "expected_post_activation_id" in sc:
+                try:
+                    submitted = json.loads(body).get("activation_id")
+                except (ValueError, AttributeError):
+                    submitted = None
+                if submitted != sc["expected_post_activation_id"]:
+                    self._send(400, {"error": "unexpected activation_id in POST body"})
+                    return
             wiring = False
             try:
                 wiring = json.loads(body).get("wiring_check") is True

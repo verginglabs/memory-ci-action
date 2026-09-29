@@ -126,6 +126,7 @@ setup_env() {
   export VERGING_SUITES=""   # the action.yml default: omit -> all chosen suites
   unset VERGING_VENDOR_VERSION VERGING_ENDPOINT VERGING_FOLDER 2>/dev/null
   unset VERGING_PRODUCT_NAME VERGING_FETCH_ONLY_RELEASE_ID VERGING_POLL_TIMEOUT_MINUTES VERGING_MODE VERGING_LEGACY_ENVIRONMENTS 2>/dev/null
+  unset VERGING_ACTIVATION_ID 2>/dev/null
   unset VERGING_DEFAULT_BRANCH VERGING_FALLBACK_PULL_REQUEST GH_PR_LIST_OUTPUT GH_COMMENTS_OUTPUT GH_SHIM_FAIL 2>/dev/null
 }
 
@@ -208,6 +209,7 @@ case_happy_path() {
   run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
   run_step reconcile.sh;       check_exit "reconcile exits 0" 0 "$STEP_EXIT"
   run_step run_release.sh;     check_exit "run_release exits 0" 0 "$STEP_EXIT"
+  check_eq "ordinary release omits activation_id" "null" "$(jq -r 'select(.method == "POST") | .body | fromjson | .activation_id' "$MOCK_DIR/requests.log")"
   run_step commit_push.sh;     check_exit "commit_push exits 0" 0 "$STEP_EXIT"
   run_step surfaces.sh;        check_exit "surfaces exits 0" 0 "$STEP_EXIT"
   run_step set_outputs.sh;     check_exit "set_outputs exits 0" 0 "$STEP_EXIT"
@@ -1587,6 +1589,113 @@ case_pending_older_than_latest() {
 
 # ---------- run ----------
 
+held_copy='Something went wrong while running this activation. It is on hold while we fix it, and we will deliver your results at no extra charge.'
+
+case_onboarding_activation() {
+  begin_case "onboarding receipt stays held, then runs and delivers both activation ids"
+  local rid="run_20260815_186efbad9769" used="act_2vsqn9f" next="act_3vsqn9f" scenario
+  scenario="$(happy_scenario "$rid" | jq --arg rid "$rid" --arg next "$next" '
+    .expected_post_activation_id = "act_2vsqn9f" |
+    .receipt.status = "held" |
+    .report.diff.activation_id = "act_2vsqn9f" |
+    .receipt.activation = "Your activation is being set up. Poll this release again for its result." |
+    .statuses = [{release_id: $rid, status: "held", activation: "Your activation is being set up. Poll this release again for its result."},
+      {release_id: $rid, status: "running"}, {release_id: $rid, status: "report_ready"}] |
+    .report.report_markdown += ("\nNext activation: set `activation_id: " + $next + "`.\n")')"
+  start_mock "$scenario" || { end_case; return; }
+  setup_env; make_repos
+  export VERGING_ACTIVATION_ID="$used"
+  run_step resolve_inputs.sh; check_exit "resolve inputs accepts an activation id" 0 "$STEP_EXIT"
+  run_step run_release.sh; check_exit "onboarding reaches its report" 0 "$STEP_EXIT"
+  run_step commit_push.sh; check_exit "onboarding report is committed" 0 "$STEP_EXIT"
+  check_eq "POST carries the used id" "$used" "$(jq -r 'select(.method == "POST") | .body | fromjson | .activation_id' "$MOCK_DIR/requests.log")"
+  check_grep "used id shown" "Activation id used: $used" "$CASE_TMP/run.log"
+  check_grep "next id shown separately" "Next activation id: $next" "$CASE_TMP/run.log"
+  check_eq "polls through held and running" "3" "$(cat "$MOCK_DIR/status-$rid.count")"
+  check_eq "latest is this report" "$rid" "$(jq -r '.release_id' "$WORKSPACE/$FOLDER/latest/release.json")"
+  check_grep "summary names the used id" "Activation id used: \`$used\`" "$GITHUB_STEP_SUMMARY"
+  check_grep "summary names the next id" "Next activation id: \`$next\`" "$GITHUB_STEP_SUMMARY"
+  end_case
+}
+
+case_current_activation_without_input() {
+  begin_case "ordinary release uses its current setup without an activation_id input"
+  local rid="run_20260815_186efbad9769" current="act_2vsqn9f" scenario
+  scenario="$(happy_scenario "$rid" | jq --arg current "$current" '.report.diff.activation_id = $current')"
+  start_mock "$scenario" || { end_case; return; }
+  setup_env; make_repos
+  run_step resolve_inputs.sh; run_step run_release.sh
+  check_exit "ordinary release delivers" 0 "$STEP_EXIT"
+  check_eq "POST leaves selection to the server" "null" "$(jq -r 'select(.method == "POST") | .body | fromjson | .activation_id' "$MOCK_DIR/requests.log")"
+  check_grep "report reveals current activation id" "Activation id used: $current (current setup)" "$CASE_TMP/run.log"
+  check_file "latest report remains available" "$WORKSPACE/$FOLDER/latest/REPORT.md"
+  end_case
+}
+
+case_held_charged_paths() {
+  local rid="run_20260815_186efbad9769" scenario
+  begin_case "held and charged failure while polling"
+  scenario="$(happy_scenario "$rid" | jq --arg rid "$rid" 'del(.report) | .statuses = [{release_id: $rid, status: "failed", failure_code: "onboarding_held_ours", failure: "setup failed"}]')"
+  start_mock "$scenario" || { end_case; return; }; setup_env; make_repos
+  run_step resolve_inputs.sh; run_step run_release.sh
+  check_exit "polling ends red" 1 "$STEP_EXIT"
+  check_grep "polling prints held copy" "$held_copy" "$CASE_TMP/run.log"
+  check_no_grep "polling does not call charged work voided" "voided tests are never billed" "$CASE_TMP/run.log"
+  end_case
+
+  begin_case "held and charged failure in fetch-only"
+  start_mock "$scenario" || { end_case; return; }; setup_env; make_repos
+  export VERGING_FETCH_ONLY_RELEASE_ID="$rid"
+  run_step resolve_inputs.sh; run_step run_release.sh
+  check_exit "fetch-only ends red" 1 "$STEP_EXIT"
+  check_grep "fetch-only prints held copy" "$held_copy" "$CASE_TMP/run.log"
+  check_eq "fetch-only submits nothing" "0" "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
+  end_case
+
+  begin_case "held and charged failure in reconciliation"
+  start_mock "$scenario" || { end_case; return; }; setup_env; make_repos
+  seed_pending_release "$rid" "2.31.0" "2026-08-15T08:25:59.868Z"
+  export VERGING_MODE=sync
+  run_step resolve_inputs.sh; run_step reconcile.sh
+  check_exit "reconciliation stays green" 0 "$STEP_EXIT"
+  check_grep "reconciliation log prints held copy" "$held_copy" "$CASE_TMP/run.log"
+  check_grep "reconciliation summary prints held copy" "$held_copy" "$GITHUB_STEP_SUMMARY"
+  check_no_path "failure is no longer pending" "$WORKSPACE/$FOLDER/releases/pending.json"
+  end_case
+}
+
+case_held_report_ready_paths() {
+  local rid="run_20260815_186efbad9769" scenario ready_scenario
+  scenario="$(happy_scenario "$rid" | jq '.statuses[-1].failure_code = "onboarding_held_ours"')"
+  ready_scenario="$(printf '%s' "$scenario" | jq '.statuses = [.statuses[-1]]')"
+  begin_case "held and charged report_ready while polling still commits report"
+  start_mock "$scenario" || { end_case; return; }; setup_env; make_repos
+  run_step resolve_inputs.sh; run_step run_release.sh; check_exit "report is fetched" 0 "$STEP_EXIT"
+  run_step commit_push.sh; check_exit "report is committed" 0 "$STEP_EXIT"
+  check_grep "polling prints held copy on report_ready" "$held_copy" "$CASE_TMP/run.log"
+  check_file "available report is present" "$WORKSPACE/$FOLDER/latest/REPORT.md"
+  end_case
+
+  begin_case "held and charged report_ready in fetch-only still commits report"
+  start_mock "$ready_scenario" || { end_case; return; }; setup_env; make_repos
+  export VERGING_FETCH_ONLY_RELEASE_ID="$rid"
+  run_step resolve_inputs.sh; run_step run_release.sh; check_exit "report is fetched" 0 "$STEP_EXIT"
+  run_step commit_push.sh; check_exit "report is committed" 0 "$STEP_EXIT"
+  check_grep "fetch-only prints held copy on report_ready" "$held_copy" "$CASE_TMP/run.log"
+  check_file "available report is present" "$WORKSPACE/$FOLDER/latest/REPORT.md"
+  end_case
+
+  begin_case "held and charged report_ready in reconciliation still commits report"
+  start_mock "$ready_scenario" || { end_case; return; }; setup_env; make_repos
+  seed_pending_release "$rid" "2.31.0" "2026-08-15T08:25:59.868Z"
+  export VERGING_MODE=sync
+  run_step resolve_inputs.sh; run_step reconcile.sh; check_exit "report is reconciled" 0 "$STEP_EXIT"
+  check_grep "reconciliation prints held copy on report_ready" "$held_copy" "$CASE_TMP/run.log"
+  check_file "available report is present" "$WORKSPACE/$FOLDER/latest/REPORT.md"
+  check_eq "report is committed" "$rid" "$(jq -r '.release_id' "$WORKSPACE/$FOLDER/latest/release.json")"
+  end_case
+}
+
 say "Verging Memory CI action test harness"
 say "Repository under test: $ROOT"
 export PATH="$TESTDIR/shims:$PATH"
@@ -1618,6 +1727,10 @@ case_reconcile_push_refused
 case_fallback_pull_request_opt_in
 case_surfaces
 case_vocabulary
+case_onboarding_activation
+case_current_activation_without_input
+case_held_charged_paths
+case_held_report_ready_paths
 
 say ""
 say "==============================="

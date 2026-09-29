@@ -60,6 +60,24 @@ in place of a verdict. Verging Labs tells you when your suites are set up;
 pushes after that run real releases. To repeat the wiring check at any time,
 pass the input `wiring_check: "true"`.
 
+## Starting an activation
+
+To start onboarding or set up new test suites, pass `activation_id` with the
+exact id Verging Labs gave you for the agent setup. For example:
+
+```yaml
+with:
+  api_key: ${{ secrets.VERGING_API_KEY }}
+  agent_setups: "Your agent setup name"
+  activation_id: "act_2vsqn9f"
+```
+
+For later releases on a delivered setup, leave `activation_id` empty to use
+that setup's current activation. The Action shows the id requested and the
+current id used in the delivered report. A report can also show a
+**Next activation id** for a new setup;
+that is a different id and is never used automatically for the current release.
+
 ## Where the report lands
 
 Every job commits the report folder to the branch it ran on and pushes it with

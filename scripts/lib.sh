@@ -456,6 +456,16 @@ ensure_folder_readme() {
   fi
 }
 
+# The status code is a machine signal for a charged onboarding that Verging
+# holds while fixing it. Ordinary failed releases retain their voided copy.
+print_held_onboarding_copy() {
+  if jq -e '.failure_code == "onboarding_held_ours"' "$1" >/dev/null 2>&1; then
+    echo "Something went wrong while running this activation. It is on hold while we fix it, and we will deliver your results at no extra charge."
+    return 0
+  fi
+  return 1
+}
+
 # poll_release RELEASE_ID TIMEOUT_MINUTES: poll the status until the report
 # is ready. Returns 0 on report_ready or corrected, 1 on failed, and 2 when
 # the deadline passes first: that is not an error, the caller records the
@@ -477,13 +487,16 @@ poll_release() {
       echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  status=$status  updated_at=$(jq -r '.updated_at // "-"' "$status_file")"
       case "$status" in
         report_ready|corrected)
+          print_held_onboarding_copy "$status_file" || true
           state_set status "$status"
           return 0
           ;;
         failed)
           failure="$(jq -r '.failure // "(no failure field on the status body)"' "$status_file")"
           echo "::error::release $id failed on the Verging side: $failure"
-          echo "The release is voided; voided tests are never billed. Start a new release, or send the release_id to contact@verginglabs.com."
+          if ! print_held_onboarding_copy "$status_file"; then
+            echo "The release is voided; voided tests are never billed. Start a new release, or send the release_id to contact@verginglabs.com."
+          fi
           {
             echo "**Release failed.** \`$id\`"
             echo
@@ -492,6 +505,7 @@ poll_release() {
           return 1
           ;;
         held)
+          print_held_onboarding_copy "$status_file" || true
           echo "  held: $(jq -r '.message // "the environment is being set up on the Verging side; the release starts on its own"' "$status_file")"
           ;;
         queued|claimed|running)
@@ -520,7 +534,7 @@ poll_release() {
 # when a newer release's report is already on record.
 fetch_and_write() {
   local id="$1" release_date="$2" latest_mode="${3:-}"
-  local folder report code vendor_version slug dir verdict stage rstatus due first_report
+  local folder report code vendor_version slug dir verdict stage rstatus due first_report next_activation_id used_activation_id requested_activation_id
   folder="$(state_get folder)"
   report="$(state_dir)/report.json"
   code="$(api_get "/v1/releases/$id/report" "$report")"
@@ -556,6 +570,23 @@ fetch_and_write() {
   due="$(jq -r '.corrections_due_by // "-"' "$report")"
   echo "Release verdict: $verdict"
   echo "Stage: $stage   status: $rstatus   corrections_due_by: $due"
+  requested_activation_id="$(state_get activation_id)"
+  used_activation_id="$(jq -r '.diff.activation_id // empty' "$report")"
+  if [ -n "$used_activation_id" ]; then
+    echo "Activation id used: $used_activation_id (current setup)"
+    echo "Activation id used: \`$used_activation_id\` (current setup)" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+  elif [ -n "$requested_activation_id" ]; then
+    echo "Activation id used: $requested_activation_id (requested; report did not repeat the id)"
+    echo "Activation id used: \`$requested_activation_id\` (requested; report did not repeat the id)" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+  fi
+  if [ -n "$used_activation_id" ] && [ -n "$requested_activation_id" ] && [ "$used_activation_id" != "$requested_activation_id" ]; then
+    echo "::warning::the report's activation id differs from the id requested; check both ids before another activation"
+  fi
+  next_activation_id="$(sed -nE 's/.*Next activation: set `activation_id: (act_[23456789abcdefghjkmnpqrstuvwxyz]{7})`.*/\1/p' "$dir/REPORT.md" | head -n 1)"
+  if [ -n "$next_activation_id" ]; then
+    echo "Next activation id: $next_activation_id (for a new setup)"
+    echo "Next activation id: \`$next_activation_id\` (for a new setup)" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+  fi
 
   index_put_row "$folder" "$id" \
     "| $release_date | $vendor_version | [$id]($slug/REPORT.md) | $(verdict_cell "$report" "$verdict") | $stage |"

@@ -56,11 +56,14 @@ if [ -n "$fetch_only" ]; then
   [ -n "$release_date" ] || release_date="$(date -u +%Y-%m-%d)"
   case "$status" in
     report_ready|corrected)
+      print_held_onboarding_copy "$status_file" || true
       ;;
     failed)
       failure="$(jq -r '.failure // "(no failure field on the status body)"' "$status_file")"
       echo "::error::release $id failed on the Verging side: $failure"
-      echo "The release is voided; voided tests are never billed. Start a new release, or send the release_id to contact@verginglabs.com."
+      if ! print_held_onboarding_copy "$status_file"; then
+        echo "The release is voided; voided tests are never billed. Start a new release, or send the release_id to contact@verginglabs.com."
+      fi
       exit 1
       ;;
     *)
@@ -86,6 +89,7 @@ vendor_version="$(state_get vendor_version)"
 agent_setups_json="$(state_get agent_setups_json)"
 suites_json="$(state_get suites_json)"
 product_name="$(state_get product_name)"
+activation_id="$(state_get activation_id)"
 
 args=(--arg vendor_version "$vendor_version")
 filter='{vendor_version: $vendor_version}'
@@ -105,6 +109,13 @@ fi
 if [ -n "$product_name" ]; then
   args+=(--arg product_name "$product_name")
   filter="$filter + {product_name: \$product_name}"
+fi
+if [ -n "$activation_id" ]; then
+  args+=(--arg activation_id "$activation_id")
+  filter="$filter + {activation_id: \$activation_id}"
+  echo "Activation id requested: $activation_id"
+else
+  echo "No activation_id input: Verging Memory CI selects the current setup."
 fi
 body="$(jq -cn "${args[@]}" "$filter")"
 
@@ -264,6 +275,7 @@ echo "Release $release_id is on record as pending in $folder/releases/pending.js
   echo "| vendor_version | \`$vendor_version\` |"
   echo "| agent setups | \`$(printf '%s' "$agent_setups_json" | jq -r 'if length == 0 then "account defaults" else join(", ") end')\` |"
   echo "| release_id | \`$release_id\` |"
+  echo "| activation id requested | \`${activation_id:-current setup selected by Verging Memory CI}\` |"
   echo "| received_at | $(jq -r '.received_at // "(not given)"' "$receipt") |"
   echo "| scope | \`$(jq -c '.scope' "$receipt")\` |"
   echo "| scope_summary | $(jq -r '.scope_summary // "(not given)"' "$receipt") |"

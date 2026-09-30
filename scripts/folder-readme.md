@@ -20,7 +20,9 @@ Verging Memory CI/
       release.json
       evidence/                  the files the report's Evidence pointers name
         <agent setup>/           one directory per agent setup on the release
-          <test>-<version>.md    one file per failed test; absent when every test passed
+          <test>-<version>.md    page for a failed test; absent when every test passed
+          <test>/               full output files for that failed test, when present
+            <kind>-<k>-<version>.md
     <date>-<version>-wiring-check/   a wiring check's page, committed like a report; nothing was tested
 ```
 

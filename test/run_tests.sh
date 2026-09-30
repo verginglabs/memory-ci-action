@@ -190,6 +190,7 @@ happy_scenario() { # $1 release id
       evidence: [
         {name: "evidence/production-mcp/cr1c07-2.31.0.md", content: "what was asked, what each release answered"},
         {name: "evidence/production-mcp/tm1c02-2.31.0.md", content: "second evidence file"},
+        {name: "evidence/production-mcp/cr1c07/search-1-2.31.0.md", content: "full search output"},
         {name: "evidence/cr1u11-2.31.0.md", content: "a flat name, the shape a single-setup release still uses"}
       ]
     }
@@ -221,11 +222,12 @@ case_happy_path() {
   check_file "release.json written" "$dir/release.json"
   check_file "per-setup evidence file written under its setup directory" "$dir/evidence/production-mcp/cr1c07-2.31.0.md"
   check_file "second per-setup evidence file written" "$dir/evidence/production-mcp/tm1c02-2.31.0.md"
+  check_file "subfolder evidence file written" "$dir/evidence/production-mcp/cr1c07/search-1-2.31.0.md"
   check_file "flat evidence file written" "$dir/evidence/cr1u11-2.31.0.md"
   check_grep "evidence content is the delivered content" "what was asked, what each release answered" "$dir/evidence/production-mcp/cr1c07-2.31.0.md"
-  check_eq "every evidence file the report serves is on disk" "3" \
+  check_eq "every evidence file the report serves is on disk" "4" \
     "$(find "$dir/evidence" -type f -name '*.md' | wc -l | tr -d ' ')"
-  check_grep "the log states what was written against what was served" "Wrote 3 of 3 evidence file(s)" "$CASE_TMP/run.log"
+  check_grep "the log states what was written against what was served" "Wrote 4 of 4 evidence file(s)" "$CASE_TMP/run.log"
   check_file "index.md written" "$WORKSPACE/$FOLDER/releases/index.md"
   check_grep "index row carries the release" "[$rid](2026-08-15-2.31.0/REPORT.md) | Ready | preliminary" "$WORKSPACE/$FOLDER/releases/index.md"
   check_file "folder README written" "$WORKSPACE/$FOLDER/README.md"
@@ -235,6 +237,9 @@ case_happy_path() {
     note_fail "folder README does not match the template"
   fi
   check_dirs_equal "latest/ is a full copy of the release directory" "$dir" "$WORKSPACE/$FOLDER/latest"
+  check_file "subfolder evidence copied to latest" "$WORKSPACE/$FOLDER/latest/evidence/production-mcp/cr1c07/search-1-2.31.0.md"
+  check_grep "subfolder evidence committed" "$FOLDER/releases/2026-08-15-2.31.0/evidence/production-mcp/cr1c07/search-1-2.31.0.md" <(git -C "$ORIGIN" ls-tree -r --name-only main)
+  check_grep "latest subfolder evidence committed" "$FOLDER/latest/evidence/production-mcp/cr1c07/search-1-2.31.0.md" <(git -C "$ORIGIN" ls-tree -r --name-only main)
   check_eq "release.json holds the four fields" \
     "$rid 2.31.0 2026-08-18" \
     "$(jq -r '"\(.release_id) \(.vendor_version) \(.corrections_due_by)"' "$dir/release.json")"
@@ -325,8 +330,11 @@ case_name_rules() {
     evidence_name_ok "evidence/production-mcp/cr1c07-1.0.0.md" || { echo "EV SHOULD ACCEPT: per-setup"; fails=1; }
     evidence_name_ok "evidence/cr1c07-1.0.0.md" || { echo "EV SHOULD ACCEPT: flat"; fails=1; }
     evidence_name_ok "evidence/a..b/x.md" || { echo "EV SHOULD ACCEPT: dot inside a segment"; fails=1; }
+    evidence_name_ok "evidence/production-mcp/cr1c07/search-1-1.0.0.md" || { echo "EV SHOULD ACCEPT: test subfolder"; fails=1; }
+    evidence_name_ok "evidence/claude-code-opus-5-(documented-integration)/cr1c07/storage-1-1.0.0.md" || { echo "EV SHOULD ACCEPT: documented setup suffix"; fails=1; }
     for bad in "evidence/../x.md" "evidence/./x.md" "evidence//x.md" "evidence/../../etc/x.md" \
-               "evidence/a/b/c.md" "/evidence/x.md" "evidence/x.txt" "evidence/-x.md" "evidence/"; do
+               "evidence/a/b/c/d.md" "evidence/a/../x.md" "evidence/a//x.md" \
+               "evidence/a/b/x.txt" "/evidence/x.md" "evidence/x.txt" "evidence/-x.md" "evidence/"; do
       evidence_name_ok "$bad" && { echo "EV SHOULD REFUSE: [$bad]"; fails=1; }
     done
     exit "$fails"
@@ -434,7 +442,7 @@ case_fetch_only() {
       report_markdown: $md,
       diff: {format: "release-diff/v1", verdict: "pass", cost_verdict: "pass",
              release_verdict: "ready", stage: "final", corrections: []},
-      evidence: []
+      evidence: [{name: "evidence/production-mcp/cr1c07/storage-1-2.30.9.md", content: "full storage output"}]
     }}
   }')"
   start_mock "$scenario" || { end_case; return; }
@@ -452,7 +460,9 @@ case_fetch_only() {
   local dir="$WORKSPACE/$FOLDER/releases/2026-08-10-2.30.9"
   check_file "REPORT.md written" "$dir/REPORT.md"
   check_file "release.json written" "$dir/release.json"
-  check_no_path "no evidence directory when every test passed" "$dir/evidence"
+  check_file "fetch-only writes full-output evidence" "$dir/evidence/production-mcp/cr1c07/storage-1-2.30.9.md"
+  check_file "fetch-only copies full-output evidence to latest" "$WORKSPACE/$FOLDER/latest/evidence/production-mcp/cr1c07/storage-1-2.30.9.md"
+  check_grep "fetch-only commits full-output evidence" "$FOLDER/releases/2026-08-10-2.30.9/evidence/production-mcp/cr1c07/storage-1-2.30.9.md" <(git -C "$ORIGIN" ls-tree -r --name-only main)
   check_dirs_equal "latest/ refreshed" "$dir" "$WORKSPACE/$FOLDER/latest"
   check_eq "committed exactly like a normal run" \
     "Verging Memory CI: report for 2.30.9 ($rid): Ready [skip ci]" \
@@ -1374,9 +1384,10 @@ case_evidence_paths() {
       evidence: [
         {name: "evidence/production-mcp/cr1c07-2.31.0.md", content: "per setup, first setup"},
         {name: "evidence/agent-sdk/cr1c07-2.31.0.md", content: "per setup, second setup"},
+        {name: "evidence/agent-sdk/cr1c07/search-1-2.31.0.md", content: "full search output"},
         {name: "evidence/tm1t04-2.31.0.md", content: "flat, the single-setup shape"},
         {name: "evidence/../../etc/x.md", content: "must never be written"},
-        {name: "evidence/a/b/c.md", content: "must never be written"},
+        {name: "evidence/a/b/c/d.md", content: "must never be written"},
         {name: "/evidence/leading-slash.md", content: "must never be written"},
         {name: "evidence/notes.txt", content: "must never be written"}
       ]
@@ -1394,6 +1405,7 @@ case_evidence_paths() {
   local dir="$WORKSPACE/$FOLDER/releases/2026-08-20-2.31.0"
   check_file "first setup's evidence file at its exact path" "$dir/evidence/production-mcp/cr1c07-2.31.0.md"
   check_file "second setup's evidence file at its exact path" "$dir/evidence/agent-sdk/cr1c07-2.31.0.md"
+  check_file "test subfolder evidence file at its exact path" "$dir/evidence/agent-sdk/cr1c07/search-1-2.31.0.md"
   check_file "the flat name still lands directly under evidence/" "$dir/evidence/tm1t04-2.31.0.md"
   check_grep "the content is the delivered content" "per setup, second setup" "$dir/evidence/agent-sdk/cr1c07-2.31.0.md"
 
@@ -1402,9 +1414,9 @@ case_evidence_paths() {
   check_no_path "a leading slash wrote nothing" "$dir/evidence/leading-slash.md"
   check_no_path "a name that is not .md wrote nothing" "$dir/evidence/notes.txt"
 
-  check_eq "exactly the three named files are on disk" "3" \
+  check_eq "exactly the four accepted files are on disk" "4" \
     "$(find "$dir/evidence" -type f | wc -l | tr -d ' ')"
-  check_grep "the log states what was written against what was served" "Wrote 3 of 7 evidence file(s)" "$CASE_TMP/run.log"
+  check_grep "the log states what was written against what was served" "Wrote 4 of 8 evidence file(s)" "$CASE_TMP/run.log"
   check_grep "the refused name is named in the log" "evidence/../../etc/x.md" "$CASE_TMP/run.log"
   check_grep "the loss is an error, not a warning" "::error::refusing an evidence entry" "$CASE_TMP/run.log"
 

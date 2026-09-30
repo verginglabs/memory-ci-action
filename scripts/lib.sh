@@ -135,24 +135,36 @@ safe_agent_setup_slug_ok() {
 #
 #   evidence/<file>.md                     one agent setup on the release
 #   evidence/<agent-setup>/<file>.md       a release across several setups
+#   evidence/<agent-setup>/<test-id>/<file>.md  full output for a failed test
 #
-# <agent-setup> is agent_setup_slug of the setup name; <file> is
-# <test-id>-<vendor_version>.md. Exactly one setup segment is accepted: no
-# deeper nesting, no leading slash, no absolute path, ".md" only, and every
-# segment goes through safe_path_segment_ok. So a written file can only land
-# inside the release directory's evidence/ folder.
+# <agent-setup> is agent_setup_slug of the setup name. The optional test-id
+# segment names a failed test's full-output files. At most two directory
+# segments follow evidence/: no deeper nesting, no leading slash, no absolute
+# path, ".md" only, and every segment is checked before writing. The setup
+# segment retains the documented-integration slug suffix rule.
 evidence_name_ok() {
-  local name="$1" rest seg file
+  local name="$1" rest setup test_id file
   case "$name" in
     evidence/*) rest="${name#evidence/}" ;;
     *) return 1 ;;
   esac
   case "$rest" in
-    */*/*) return 1 ;;
-    */*) seg="${rest%%/*}"; file="${rest#*/}"; [ -n "$seg" ] || return 1 ;;
-    *) seg=""; file="$rest" ;;
+    */*/*/*) return 1 ;;
+    */*/*)
+      setup="${rest%%/*}"
+      rest="${rest#*/}"
+      test_id="${rest%%/*}"
+      file="${rest#*/}"
+      safe_agent_setup_slug_ok "$setup" || return 1
+      safe_path_segment_ok "$test_id" || return 1
+      ;;
+    */*)
+      setup="${rest%%/*}"
+      file="${rest#*/}"
+      safe_agent_setup_slug_ok "$setup" || return 1
+      ;;
+    *) file="$rest" ;;
   esac
-  if [ -n "$seg" ]; then safe_agent_setup_slug_ok "$seg" || return 1; fi
   case "$file" in *.md) ;; *) return 1 ;; esac
   safe_path_segment_ok "$file"
 }

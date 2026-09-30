@@ -609,8 +609,12 @@ fetch_and_write() {
   requested_activation_id="$(state_get activation_id)"
   used_activation_id="$(jq -r '.diff.activation_id // empty' "$report")"
   if [ -n "$used_activation_id" ]; then
-    echo "Activation id used: $used_activation_id (current setup)"
-    echo "Activation id used: \`$used_activation_id\` (current setup)" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+    # An id this workflow sent is named as such; one the release picked up from
+    # the setup on its own is the current setup's (Matt, 2026-09-30, #1124).
+    used_label="current setup"
+    [ -n "$requested_activation_id" ] && [ "$requested_activation_id" = "$used_activation_id" ] && used_label="sent by this workflow"
+    echo "Activation id used: $used_activation_id ($used_label)"
+    echo "Activation id used: \`$used_activation_id\` ($used_label)" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
   elif [ -n "$requested_activation_id" ]; then
     echo "Activation id used: $requested_activation_id (requested; report did not repeat the id)"
     echo "Activation id used: \`$requested_activation_id\` (requested; report did not repeat the id)" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"

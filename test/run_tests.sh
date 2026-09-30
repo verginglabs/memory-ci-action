@@ -1902,6 +1902,7 @@ case_onboarding_activation() {
   check_eq "POST carries the used id" "$used" "$(jq -r 'select(.method == "POST") | .body | fromjson | .activation_id' "$MOCK_DIR/requests.log")"
   check_eq "activation POST carries the workflow run Idempotency-Key" "acme/widget:1111111111111111111111111111111111111111:4242" "$(posted_header 0 idempotency-key)"
   check_grep "used id shown" "Activation id used: $used" "$CASE_TMP/run.log"
+  check_grep "a sent id is labelled as sent by this workflow" "Activation id used: $used (sent by this workflow)" "$CASE_TMP/run.log"
   check_grep "next id shown separately" "Next activation id: $next" "$CASE_TMP/run.log"
   check_eq "polls through held and running" "3" "$(cat "$MOCK_DIR/status-$rid.count")"
   check_eq "latest is this report" "$rid" "$(jq -r '.release_id' "$WORKSPACE/$FOLDER/latest/release.json")"

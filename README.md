@@ -80,8 +80,9 @@ that is a different id and is never used automatically for the current release.
 
 ## Where the report lands
 
-Every job commits the report folder to the branch it ran on and pushes it with
-the workflow's own token, so that branch must accept pushes from this workflow
+When the report is ready, the Action commits it to the report folder on the
+branch the job ran on and pushes it with the workflow's own token, so that
+branch must accept pushes from this workflow
 (`permissions: contents: write` in the workflow, and no ruleset or branch
 protection that refuses it). When the push is refused the job fails with an
 error that names the branch and what to allow; the Action writes no other
@@ -118,9 +119,9 @@ key of your own, set the input `idempotency_key`.
 
 Two kinds of report land after the job that submitted the release: the
 preliminary report of a release the job stopped waiting for, and the final
-report that replaces a preliminary report when it needed correction. Both are
-committed by your next job before it submits anything, and by this second
-workflow on demand or on a schedule.
+report that replaces a preliminary report when it needed correction.
+A later job commits each report that is ready before it submits anything;
+this second workflow also collects ready reports on demand or on a schedule.
 
 Add this second workflow file next to the first. It uses the same `VERGING_API_KEY` secret:
 

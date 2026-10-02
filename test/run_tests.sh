@@ -211,6 +211,14 @@ case_default_poll_contract() {
   check_grep "action.yml description has the approved text" "$copy" "$ROOT/action.yml"
   check_grep "README has the approved text" "$copy" \
     <(python3 -c 'import re,sys; print(re.sub(r"\s+", " ", open(sys.argv[1]).read()))' "$ROOT/README.md")
+  check_grep "README scopes report commits to readiness" \
+    "When the report is ready, the Action commits it to the report folder on the branch the job ran on" \
+    <(python3 -c 'import re,sys; print(re.sub(r"\s+", " ", open(sys.argv[1]).read()))' "$ROOT/README.md")
+  check_no_grep "README does not promise a report commit on every job" \
+    "Every job commits the report folder" "$ROOT/README.md"
+  check_grep "README scopes later report commits to readiness" \
+    "when it needed correction. A later job commits each report that is ready" \
+    <(python3 -c 'import re,sys; print(re.sub(r"\s+", " ", open(sys.argv[1]).read()))' "$ROOT/README.md")
   end_case
 }
 
@@ -279,6 +287,10 @@ case_status_get_has_time_limit() {
   else
     note_fail "curl has no positive total time limit"
   fi
+  : > "$STATUS_TIMEOUT_LOG"
+  check_eq "report api_get returns its status" "200" \
+    "$(api_get "/v1/releases/run_synthetic/report" "$CASE_TMP/report.json")"
+  check_no_grep "report downloads have no total time limit" "max-time=" "$STATUS_TIMEOUT_LOG"
   unset -f curl
   end_case
 }

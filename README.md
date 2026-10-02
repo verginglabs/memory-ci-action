@@ -3,8 +3,8 @@
 
 # Verging Memory CI GitHub Action
 
-Submits each release of your memory product to Verging Memory CI, waits for
-the regression report, and commits it into your repository.
+Submits each release of your memory product to Verging Memory CI and commits
+its report when it is ready.
 
 ## Install
 
@@ -93,14 +93,13 @@ wiring check.
 
 ## How long a job waits
 
-A release is usually still being tested when the default wait passes. The
-job waits for `poll_timeout_minutes` (45 by default) and then ends green:
-a notice says "Verging Labs is still testing release <id>", the release is
-recorded in `Verging Memory CI/releases/pending.json`, the `verdict` output
-is `Pending`, and the `report_path` output is empty. The report is committed
-by the next job on any push, or by the sync workflow below, once it is ready.
-To have the report land on the same job, raise `poll_timeout_minutes`; a
-waiting job spends Actions minutes.
+By default the job does not wait for the report: it checks once whether the
+report is ready, and then ends. If it is ready, the job commits it. If testing
+has already failed, the job fails. Otherwise the job ends green with the verdict
+`Pending`, and the report is committed once it is ready by the next job on any
+push, or by running the Action with `mode: sync`. Set `poll_timeout_minutes` to
+a number of minutes to have the job wait for the report instead (a waiting job
+spends GitHub Actions minutes).
 
 ## Retries and re-runs
 

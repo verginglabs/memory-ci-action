@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# The release itself. Normal runs submit a release, poll until the report is
-# ready, and write it into the report folder. The release goes on record as
-# pending (releases/pending.json) the moment it is accepted; when the deadline
-# passes before the report is ready the job ends green with the verdict
+# The release itself. Normal runs submit a release, check once by default
+# whether the report is ready, and write it when ready. The release goes on
+# record as pending (releases/pending.json) the moment it is accepted; when
+# the deadline passes before the report is ready the job ends green with the verdict
 # "Pending", and the reconcile pass of a later job collects the report. When
 # fetch_only_release_id is set, nothing is submitted: the named release's
 # report is fetched and written exactly like a normal run's. When
@@ -22,7 +22,7 @@ if [ "$(state_get mode)" = "sync" ]; then
 fi
 
 timeout="$(state_get poll_timeout_minutes)"
-[ -n "$timeout" ] || timeout=45
+[ -n "$timeout" ] || timeout=0
 api_base="$(state_get api_base)"
 folder="$(state_get folder)"
 fetch_only="$(state_get fetch_only)"

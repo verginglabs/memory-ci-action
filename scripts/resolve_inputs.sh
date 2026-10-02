@@ -139,7 +139,7 @@ fi
 # characters) by hashing anything longer or wider.
 state_set idempotency_key "${VERGING_IDEMPOTENCY_KEY:-}"
 
-timeout="${VERGING_POLL_TIMEOUT_MINUTES:-45}"
+timeout="${VERGING_POLL_TIMEOUT_MINUTES:-0}"
 if ! printf '%s' "$timeout" | grep -Eq '^[0-9]+$'; then
   echo "::error::poll_timeout_minutes '$timeout' is not a whole number of minutes"
   exit 1

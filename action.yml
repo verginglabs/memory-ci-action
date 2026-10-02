@@ -1,5 +1,5 @@
 name: "Verging Memory CI"
-description: "Submits a release of your memory product to Verging Memory CI, waits for the regression report, and commits the report into your repository."
+description: "Submits a release of your memory product to Verging Memory CI and commits its report when it is ready."
 author: "Verging Labs"
 branding:
   icon: "check-circle"
@@ -62,9 +62,9 @@ inputs:
     required: false
     default: ""
   poll_timeout_minutes:
-    description: "How many minutes the job waits for the report. A release is often still being tested when the default (45) passes: the job then ends green with the verdict output `Pending`, the release is recorded in the report folder's releases/pending.json, and the next job on any push, or a mode: sync job, commits the report once it is ready. Raise it to have the report land on the same job (a waiting job spends Actions minutes); 0 stops waiting right after the receipt."
+    description: "By default the job does not wait for the report: it checks once whether the report is ready, and then ends. If it is ready, the job commits it. If testing has already failed, the job fails. Otherwise the job ends green with the verdict `Pending`, and the report is committed once it is ready by the next job on any push, or by running the Action with `mode: sync`. Set `poll_timeout_minutes` to a number of minutes to have the job wait for the report instead (a waiting job spends GitHub Actions minutes)."
     required: false
-    default: "45"
+    default: "0"
 
 outputs:
   release_id:

@@ -25,7 +25,13 @@ state_get() {
 # HTTP status code ("000" when the request itself failed).
 api_get() {
   local path="$1" out="$2" code
-  code="$(curl -sS -o "$out" -w '%{http_code}' \
+  local curl_timeout=()
+  # A status request cannot hold a one-check job indefinitely. Report bodies
+  # may be larger, so the bound applies to the status endpoint only.
+  if [[ "$path" =~ ^/v1/releases/[^/]+$ ]]; then
+    curl_timeout=(--max-time 20)
+  fi
+  code="$(curl -sS "${curl_timeout[@]}" -o "$out" -w '%{http_code}' \
     -H "Authorization: Bearer ${VERGING_API_KEY:?VERGING_API_KEY is not set}" \
     "$(state_get api_base)$path")" || code="000"
   printf '%s' "$code"
@@ -514,7 +520,11 @@ poll_release() {
   deadline=$(( $(date +%s) + timeout_min * 60 ))
   status="unknown"
   state_set last_status "$status"
-  echo "Polling $(state_get api_base)/v1/releases/$id every ${interval}s for up to ${timeout_min} minute(s)"
+  if [ "$timeout_min" -eq 0 ]; then
+    echo "Checking $(state_get api_base)/v1/releases/$id once"
+  else
+    echo "Polling $(state_get api_base)/v1/releases/$id every ${interval}s for up to ${timeout_min} minute(s)"
+  fi
   while :; do
     code="$(api_get "/v1/releases/$id" "$status_file")"
     if [ "$code" = "200" ]; then

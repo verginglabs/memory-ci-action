@@ -127,6 +127,8 @@ setup_env() {
   export VERGING_SUITES=""   # the action.yml default: omit -> all chosen suites
   unset VERGING_VENDOR_VERSION VERGING_ENDPOINT VERGING_FOLDER 2>/dev/null
   unset VERGING_PRODUCT_NAME VERGING_FETCH_ONLY_RELEASE_ID VERGING_POLL_TIMEOUT_MINUTES VERGING_MODE VERGING_LEGACY_ENVIRONMENTS 2>/dev/null
+  # Multi-answer cases opt in to waiting. Default cases explicitly omit it.
+  export VERGING_POLL_TIMEOUT_MINUTES=1
   unset VERGING_ACTIVATION_ID 2>/dev/null
   unset VERGING_DEFAULT_BRANCH VERGING_FALLBACK_PULL_REQUEST GH_PR_LIST_OUTPUT GH_COMMENTS_OUTPUT GH_SHIM_FAIL VERGING_IDEMPOTENCY_KEY 2>/dev/null
 }
@@ -200,6 +202,86 @@ happy_scenario() { # $1 release id
 # ---------- the cases ----------
 
 FOLDER="Verging Memory CI"
+
+case_default_poll_contract() {
+  begin_case "the omitted poll input checks once; the Action metadata and README explain every outcome"
+  local copy='By default the job does not wait for the report: it checks once whether the report is ready, and then ends. If it is ready, the job commits it. If testing has already failed, the job fails. Otherwise the job ends green with the verdict `Pending`, and the report is committed once it is ready by the next job on any push, or by running the Action with `mode: sync`. Set `poll_timeout_minutes` to a number of minutes to have the job wait for the report instead (a waiting job spends GitHub Actions minutes).'
+  check_eq "action.yml declares zero as the default" "0" \
+    "$(sed -n '/^  poll_timeout_minutes:/,/^outputs:/p' "$ROOT/action.yml" | sed -nE 's/^    default: "([0-9]+)"/\1/p' | head -n 1)"
+  check_grep "action.yml description has the approved text" "$copy" "$ROOT/action.yml"
+  check_grep "README has the approved text" "$copy" \
+    <(python3 -c 'import re,sys; print(re.sub(r"\s+", " ", open(sys.argv[1]).read()))' "$ROOT/README.md")
+  end_case
+}
+
+case_default_ready_first() {
+  begin_case "the default readiness check commits a report ready on its first answer"
+  local rid="run_20260815_186efbad9769"
+  start_mock "$(happy_scenario "$rid" | jq --arg rid "$rid" '.statuses = [
+    {release_id: $rid, status: "report_ready", updated_at: "2026-08-15T08:31:00Z", corrections_due_by: "2026-08-18"}
+  ]')" || { end_case; return; }
+  setup_env
+  unset VERGING_POLL_TIMEOUT_MINUTES
+  make_repos
+  run_step resolve_inputs.sh; check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  check_eq "omitted input resolves to zero" "0" "$(cat "$RUNNER_TEMP/verging-memory-ci-state/poll_timeout_minutes")"
+  run_step reconcile.sh; check_exit "reconcile exits 0" 0 "$STEP_EXIT"
+  run_step run_release.sh; check_exit "run_release exits 0" 0 "$STEP_EXIT"
+  run_step commit_push.sh; check_exit "commit_push exits 0" 0 "$STEP_EXIT"
+  run_step set_outputs.sh; check_exit "set_outputs exits 0" 0 "$STEP_EXIT"
+  check_eq "one status answer" "1" "$(cat "$MOCK_DIR/status-$rid.count")"
+  check_file "the report is written" "$WORKSPACE/$FOLDER/latest/REPORT.md"
+  check_grep "the output is Ready" "verdict=Ready" "$GITHUB_OUTPUT"
+  check_eq "the report is committed" \
+    "Verging Memory CI: report for 2.31.0 ($rid): Ready [skip ci]" \
+    "$(git -C "$ORIGIN" log -1 --format=%s main)"
+  end_case
+}
+
+case_default_failed_first() {
+  begin_case "the default readiness check fails the job on a first failed answer"
+  local rid="run_20260815_186efbad9769"
+  start_mock "$(happy_scenario "$rid" | jq --arg rid "$rid" 'del(.report) | .statuses = [
+    {release_id: $rid, status: "failed", failure: "synthetic test failure"}
+  ]')" || { end_case; return; }
+  setup_env
+  unset VERGING_POLL_TIMEOUT_MINUTES
+  make_repos
+  run_step resolve_inputs.sh; check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  check_eq "omitted input resolves to zero" "0" "$(cat "$RUNNER_TEMP/verging-memory-ci-state/poll_timeout_minutes")"
+  run_step reconcile.sh; check_exit "reconcile exits 0" 0 "$STEP_EXIT"
+  run_step run_release.sh; check_exit "run_release fails" 1 "$STEP_EXIT"
+  check_eq "one status answer" "1" "$(cat "$MOCK_DIR/status-$rid.count")"
+  check_grep "the failure is reported" "::error::release $rid failed on the Verging side: synthetic test failure" "$CASE_TMP/run.log"
+  check_no_path "the failed release is not pending" "$WORKSPACE/$FOLDER/releases/pending.json"
+  check_no_path "no report is written" "$WORKSPACE/$FOLDER/latest"
+  end_case
+}
+
+case_status_get_has_time_limit() {
+  begin_case "a status GET has a bounded request time"
+  setup_env
+  source "$ROOT/scripts/lib.sh"
+  state_set api_base "http://127.0.0.1:1"
+  STATUS_TIMEOUT_LOG="$CASE_TMP/curl-timeout.log"
+  : > "$STATUS_TIMEOUT_LOG"
+  curl() {
+    local previous="" arg
+    for arg in "$@"; do
+      if [ "$previous" = "--max-time" ]; then printf 'max-time=%s\n' "$arg" >> "$STATUS_TIMEOUT_LOG"; fi
+      previous="$arg"
+    done
+    printf 200
+  }
+  check_eq "api_get returns its status" "200" "$(api_get "/v1/releases/run_synthetic" "$CASE_TMP/status.json")"
+  if grep -Eq '^max-time=[1-9][0-9]*$' "$STATUS_TIMEOUT_LOG"; then
+    say "    ok: curl has a positive total time limit"
+  else
+    note_fail "curl has no positive total time limit"
+  fi
+  unset -f curl
+  end_case
+}
 
 case_happy_path() {
   begin_case "submit, poll, fetch: the folder layout, the commit, the check"
@@ -1631,12 +1713,19 @@ case_timeout_pending() {
   local rid="run_20260826_5e6f7a8b9c0d"
   start_mock "$(happy_scenario "$rid" | jq --arg rid "$rid" '.statuses = [{release_id: $rid, status: "running", updated_at: "2026-08-15T08:40:00Z"}]')" || { end_case; return; }
   setup_env
+  unset VERGING_POLL_TIMEOUT_MINUTES
   make_repos
-  export VERGING_POLL_TIMEOUT_MINUTES="0"
 
   run_step resolve_inputs.sh;  check_exit "resolve_inputs exits 0" 0 "$STEP_EXIT"
+  check_eq "omitted input resolves to zero" "0" "$(cat "$RUNNER_TEMP/verging-memory-ci-state/poll_timeout_minutes")"
   run_step reconcile.sh;       check_exit "reconcile exits 0" 0 "$STEP_EXIT"
-  run_step run_release.sh;     check_exit "run_release exits 0 when the deadline passes" 0 "$STEP_EXIT"
+  ( cd "$WORKSPACE" && timeout 8s "$ROOT/scripts/run_release.sh" ) >> "$CASE_TMP/run.log" 2>&1
+  STEP_EXIT=$?
+  check_exit "run_release exits 0 when the deadline passes" 0 "$STEP_EXIT"
+  if [ "$STEP_EXIT" -eq 124 ]; then
+    end_case
+    return
+  fi
   run_step commit_push.sh;     check_exit "commit_push exits 0" 0 "$STEP_EXIT"
   export GITHUB_EVENT_NAME="pull_request"
   export GITHUB_EVENT_PATH="$CASE_TMP/event.json"
@@ -1993,6 +2082,10 @@ say "Verging Memory CI action test harness"
 say "Repository under test: $ROOT"
 export PATH="$TESTDIR/shims:$PATH"
 
+case_default_poll_contract
+case_default_ready_first
+case_default_failed_first
+case_status_get_has_time_limit
 case_happy_path
 case_single_setup_payload
 case_multi_setup_payload

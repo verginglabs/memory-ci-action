@@ -42,7 +42,7 @@ inputs:
     required: false
     default: ""
   fetch_only_release_id:
-    description: "Fetch and commit the report of this existing release id without submitting anything. Use it to recover a job that failed after submitting; the id is in that job's log. A job that stopped waiting for its report needs no recovery: the release is on record as pending in the report folder, and the next job (or a mode: sync job) commits the report once it is ready."
+    description: "Fetch and commit the report of this existing release id without submitting anything. Use it to recover a job that failed after submitting; the id is in that job's log. A job that ended before its report was ready needs no recovery: the release is on record as pending in the report folder, and the next job (or a mode: sync job) commits the report once it is ready."
     required: false
     default: ""
   wiring_check:
@@ -71,7 +71,7 @@ outputs:
     description: "The id of the release whose report this run fetched, or of the wiring check this run performed."
     value: ${{ steps.finish.outputs.release_id }}
   verdict:
-    description: "The Release verdict from the report header: Ready, or Not ready with the reason. \"Wiring check\" when this run performed the wiring check instead of a release (nothing was tested; not a verdict). \"Pending\" when the job stopped waiting before the report was ready (poll_timeout_minutes passed): the release is on record as pending and a later job commits the report."
+    description: "The Release verdict from the report header: Ready, or Not ready with the reason. \"Wiring check\" when this run performed the wiring check instead of a release (nothing was tested; not a verdict). \"Pending\" when the report was not ready when the job ended (after its single check, or after poll_timeout_minutes when set): the release is on record as pending and a later job commits the report."
     value: ${{ steps.finish.outputs.verdict }}
   report_path:
     description: "Repository relative path of the committed REPORT.md for this release, or of the wiring check's page. Empty when the verdict is Pending: the report is not in the repository yet."

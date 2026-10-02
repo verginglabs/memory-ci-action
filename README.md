@@ -80,9 +80,9 @@ that is a different id and is never used automatically for the current release.
 
 ## Where the report lands
 
-When the report is ready, the Action commits it to the report folder on the
-branch the job ran on and pushes it with the workflow's own token, so that
-branch must accept pushes from this workflow
+The Action commits the report when it is ready, or the pending record when it
+is not, to the report folder on the branch the job ran on and pushes it with
+the workflow's own token, so that branch must accept pushes from this workflow
 (`permissions: contents: write` in the workflow, and no ruleset or branch
 protection that refuses it). When the push is refused the job fails with an
 error that names the branch and what to allow; the Action writes no other

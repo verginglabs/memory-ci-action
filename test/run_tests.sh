@@ -211,9 +211,13 @@ case_default_poll_contract() {
   check_grep "action.yml description has the approved text" "$copy" "$ROOT/action.yml"
   check_grep "README has the approved text" "$copy" \
     <(python3 -c 'import re,sys; print(re.sub(r"\s+", " ", open(sys.argv[1]).read()))' "$ROOT/README.md")
-  check_grep "README scopes report commits to readiness" \
-    "When the report is ready, the Action commits it to the report folder on the branch the job ran on" \
+  check_grep "README names ready reports and pending records as commits" \
+    "The Action commits the report when it is ready, or the pending record when it is not, to the report folder on the branch the job ran on" \
     <(python3 -c 'import re,sys; print(re.sub(r"\s+", " ", open(sys.argv[1]).read()))' "$ROOT/README.md")
+  check_grep "fetch-only description includes jobs that end before readiness" \
+    "A job that ended before its report was ready needs no recovery" "$ROOT/action.yml"
+  check_no_grep "Pending output is not described as a timeout-only result" \
+    "(poll_timeout_minutes passed)" "$ROOT/action.yml"
   check_no_grep "README does not promise a report commit on every job" \
     "Every job commits the report folder" "$ROOT/README.md"
   check_grep "README scopes later report commits to readiness" \
@@ -1772,7 +1776,8 @@ case_timeout_pending() {
   check_grep "the pull request comment says report pending in one line" "**Verging Memory CI: report pending.** Verging Labs is still testing release" "$GH_SHIM_LOG"
   check_no_grep "the comment links no report" "[Read the report]" "$GH_SHIM_LOG"
   check_grep "job summary says the report is pending" "### Report pending" "$GITHUB_STEP_SUMMARY"
-  check_grep "action.yml documents the Pending verdict" 'Pending\" when the job stopped waiting before the report was ready' "$ROOT/action.yml"
+  check_grep "action.yml documents Pending after one check or an explicit wait" \
+    '\"Pending\" when the report was not ready when the job ended (after its single check, or after poll_timeout_minutes when set): the release is on record as pending and a later job commits the report.' "$ROOT/action.yml"
   check_grep "action.yml commits on every path but a cancel" "if: \${{ !cancelled() && inputs.mode != 'sync' }}" "$ROOT/action.yml"
 
   # A later sync job: the report is ready now.

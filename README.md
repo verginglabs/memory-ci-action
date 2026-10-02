@@ -129,7 +129,7 @@ Add this second workflow file next to the first. It uses the same `VERGING_API_K
 name: Verging Memory CI sync
 on:
   workflow_dispatch: {}
-  # Optional: also collect final reports between releases, every 3 hours.
+  # Optional: also collect ready reports between releases, every 3 hours.
   schedule:
     - cron: "17 */3 * * *"
 permissions:

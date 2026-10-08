@@ -62,7 +62,7 @@ if [ -n "$fetch_only" ]; then
       failure="$(jq -r '.failure // "(no failure field on the status body)"' "$status_file")"
       echo "::error::release $id failed on the Verging side: $failure"
       if ! print_held_onboarding_copy "$status_file"; then
-        echo "This release is pending. The final report will include the result."
+        print_failed_release_copy "$status_file"
       fi
       exit 1
       ;;

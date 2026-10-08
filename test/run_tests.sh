@@ -46,6 +46,23 @@ check_dirs_equal() { # desc dir1 dir2
   if diff -r "$2" "$3" >/dev/null 2>&1; then say "    ok: $1"; else note_fail "$1 ($2 and $3 differ)"; fi
 }
 
+# Check after each script call, including failed lookups and conflict recovery.
+check_api_artifacts() {
+  local artifact temporary
+  for artifact in "$CASE_TMP/run.log" "$CASE_TMP/run-earlier.log" "${MOCK_DIR:-}/requests.log"; do
+    if [ -f "$artifact" ] && grep -qF 'test-key' "$artifact"; then
+      note_fail "the synthetic API key appears in $artifact"
+    fi
+  done
+  if [ -d "${WORKSPACE:-}/$FOLDER" ] && grep -RqF 'test-key' "$WORKSPACE/$FOLDER"; then
+    note_fail "the synthetic API key appears in the report tree"
+  fi
+  if [ -d "${RUNNER_TEMP:-}/verging-memory-ci-state" ]; then
+    temporary="$(find "$RUNNER_TEMP/verging-memory-ci-state" -name 'latest-status.*' -print)"
+    check_eq "temporary receipt status bodies are gone after the call" "" "$temporary"
+  fi
+}
+
 # ---------- case plumbing ----------
 
 begin_case() {
@@ -59,6 +76,8 @@ begin_case() {
 }
 
 end_case() {
+  # Recheck in the parent shell after any script calls made in a subshell.
+  check_api_artifacts
   stop_mock
   if [ "$CASE_FAILED" = "0" ]; then
     PASS=$((PASS + 1))
@@ -155,6 +174,7 @@ make_repos() {
 run_step() { # $1 script name; sets STEP_EXIT
   ( cd "$WORKSPACE" && "$ROOT/scripts/$1" ) >> "$CASE_TMP/run.log" 2>&1
   STEP_EXIT=$?
+  check_api_artifacts
 }
 
 # ---------- fixtures ----------
@@ -514,7 +534,8 @@ case_failed() {
   run_step run_release.sh
   check_exit "run_release exits 1 on failed" 1 "$STEP_EXIT"
   check_grep "the failure text is printed" "we could not reach your endpoint from the agent environment" "$CASE_TMP/run.log"
-  check_grep "the pending copy is printed" "This release is pending. The final report will include the result." "$CASE_TMP/run.log"
+  check_eq "the API's customer failure text is printed as its own line" 1 \
+    "$(grep -cxF 'we could not reach your endpoint from the agent environment' "$CASE_TMP/run.log" || true)"
   check_no_path "no report written on a failed release" "$WORKSPACE/$FOLDER/latest"
   check_no_path "no index written on a failed release" "$WORKSPACE/$FOLDER/releases/index.md"
   check_no_path "no pending record is left for a failed release" "$WORKSPACE/$FOLDER/releases/pending.json"
@@ -1132,8 +1153,15 @@ case_rerun_diverged_checkout_conflict() {
 }
 
 case_concurrent_release_conflict() {
-  begin_case "two jobs race on the index: the conflict is resolved from the branch and the second job's row, directory and latest/ are put back"
-  local rid_a="run_20260815_186efbad9769" rid_b="run_20260815_bbbbbbbbbbbb" before
+  local rid_a="run_20260815_186efbad9769" rid_b="run_20260815_bbbbbbbbbbbb" before outcome expected scenario
+  for outcome in refreshed kept; do
+  if [ "$outcome" = refreshed ]; then
+    begin_case "two jobs race on the index: the conflict is resolved from the branch and the second job's row, directory and latest/ are put back"
+    expected="$rid_b"
+  else
+    begin_case "two jobs race on the index: the branch's newer latest stays and the second job's row and directory are put back"
+    expected="$rid_a"
+  fi
   start_mock "$(happy_scenario "$rid_a")" || { end_case; return; }
   setup_env
   make_repos
@@ -1148,7 +1176,14 @@ case_concurrent_release_conflict() {
   rerun_from "$before"
   export GITHUB_RUN_ID="4343"
   export VERGING_VENDOR_VERSION="2.32.0"
-  set_scenario "$(happy_scenario "$rid_b" | jq '.report.vendor_version = "2.32.0"')"
+  scenario="$(happy_scenario "$rid_b" | jq '.report.vendor_version = "2.32.0"')"
+  if [ "$outcome" = kept ]; then
+    scenario="$(printf '%s' "$scenario" | jq --arg a "$rid_a" --arg b "$rid_b" '.status_by_id = {
+      ($a): [{release_id: $a, status: "report_ready", received_at: "2026-08-15T09:25:59.868Z"}],
+      ($b): [{release_id: $b, status: "report_ready", received_at: "2026-08-15T08:25:59.868Z"}]
+    }')"
+  fi
+  set_scenario "$scenario"
   run_step resolve_inputs.sh
   run_step reconcile.sh
   run_step run_release.sh;     check_exit "job B: run_release exits 0" 0 "$STEP_EXIT"
@@ -1157,7 +1192,12 @@ case_concurrent_release_conflict() {
   check_grep "the rebase conflicted on the index" "CONFLICT" "$CASE_TMP/run.log"
   check_grep "the conflict is resolved from the branch" "the branch's version of every conflicting file is taken:" "$CASE_TMP/run.log"
   check_grep "job B's row is put back" "the index row for $rid_b is put back" "$CASE_TMP/run.log"
-  check_grep "latest/ follows job B's release" "latest/ is refreshed from this job's release, the newest on record" "$CASE_TMP/run.log"
+  if [ "$outcome" = refreshed ]; then
+    check_grep "a completed copy is reported" "latest/ is refreshed from this job's release, the newest on record" "$CASE_TMP/run.log"
+  else
+    check_no_grep "a skipped copy is not reported as refreshed" "latest/ is refreshed from this job's release, the newest on record" "$CASE_TMP/run.log"
+    check_grep "the log explains why the copy stays" "latest/ left as it is: the fetched release is no later than the current copy." "$CASE_TMP/run.log"
+  fi
   check_grep "the push then lands" "Report commit pushed to main." "$CASE_TMP/run.log"
   check_no_grep "no error" "::error::" "$CASE_TMP/run.log"
   check_grep "the index keeps job A's row" "[$rid_a](2026-08-15-2.31.0/REPORT.md) | Ready | preliminary |" <(git -C "$ORIGIN" show "main:$FOLDER/releases/index.md")
@@ -1165,11 +1205,12 @@ case_concurrent_release_conflict() {
   check_eq "two rows, no duplicates" "2" "$(git -C "$ORIGIN" show "main:$FOLDER/releases/index.md" | grep -c '^| 2026-')"
   check_eq "job A's directory is on the branch" "$rid_a" "$(git -C "$ORIGIN" show "main:$FOLDER/releases/2026-08-15-2.31.0/release.json" | jq -r '.release_id')"
   check_eq "job B's directory is on the branch" "$rid_b" "$(git -C "$ORIGIN" show "main:$FOLDER/releases/2026-08-15-2.32.0/release.json" | jq -r '.release_id')"
-  check_eq "latest/ is job B's release" "$rid_b" "$(git -C "$ORIGIN" show "main:$FOLDER/latest/release.json" | jq -r '.release_id')"
+  check_eq "latest/ follows the copy decision" "$expected" "$(git -C "$ORIGIN" show "main:$FOLDER/latest/release.json" | jq -r '.release_id')"
   check_no_path "no pending record is left" "$WORKSPACE/$FOLDER/releases/pending.json"
   check_eq "the checkout is clean" "" "$(git -C "$WORKSPACE" status --porcelain)"
   unset VERGING_VENDOR_VERSION
   end_case
+  done
 }
 
 # reject_pushes_to_main: the origin refuses every push to main from now on,
@@ -1839,7 +1880,8 @@ case_pending_running_then_failed() {
   run_step reconcile.sh;       check_exit "reconcile exits 0 on a failed pending release: no red job" 0 "$STEP_EXIT"
   check_no_grep "no error anywhere in the job" "::error::" "$CASE_TMP/run.log"
   check_grep "the failure is a warning with the failure text" "::warning::release $rid (2.31.0) failed on the Verging side: we could not reach your endpoint from the agent environment" "$CASE_TMP/run.log"
-  check_grep "the pending copy is printed" "This release is pending. The final report will include the result." "$CASE_TMP/run.log"
+  check_eq "the API's customer failure text is printed as its own line" 1 \
+    "$(grep -cxF 'we could not reach your endpoint from the agent environment' "$CASE_TMP/run.log" || true)"
   check_no_path "the pending record is cleared" "$pending"
   check_grep "the index notes the failure on the release's own row" "| 2026-08-15 | 2.31.0 | $rid | Failed: we could not reach your endpoint from the agent environment | failed |" "$WORKSPACE/$FOLDER/releases/index.md"
   check_no_path "no release directory for a failed release" "$WORKSPACE/$FOLDER/releases/2026-08-15-2.31.0"
@@ -2396,6 +2438,7 @@ PY
     cd "$WORKSPACE" && "$ROOT/scripts/$script"
   ) >> "$CASE_TMP/run.log" 2>&1
   STEP_EXIT=$?
+  check_api_artifacts
 }
 
 case_latest_remote_during_push() {
@@ -2443,6 +2486,7 @@ SH
   check_grep "first push races with the incoming report" "Push attempt 1 to main failed" "$CASE_TMP/run.log"
   check_grep "latest files conflict during rebase" "CONFLICT" "$CASE_TMP/run.log"
   check_grep "the folder conflict is recovered" "the branch's version of every conflicting file is taken:" "$CASE_TMP/run.log"
+  check_no_grep "the kept remote report is not reported as a new copy" "latest/ is refreshed from this job's release, the newest on record" "$CASE_TMP/run.log"
   check_pair_collected "$newer" 2
   check_eq "the pushed latest stays on the remote's newer report" "$newer" \
     "$(git -C "$ORIGIN" show "main:$FOLDER/latest/release.json" | jq -r '.release_id')"
@@ -2454,11 +2498,15 @@ SH
 }
 
 case_pending_failure_copy_paths() {
-  local rid="run_20260815_aaaaaaaaaaaa" path
-  local copy="This release is pending. The final report will include the result."
+  local rid="run_20260815_aaaaaaaaaaaa" path body copy scenario
+  for body in api-message no-message; do
+  copy="$(jq -r '.failure' "$TESTDIR/fixtures/failed-status.json")"
+  [ "$body" = api-message ] || copy="Testing did not finish for this release; its status is failed."
   for path in polling fetch-only reconciliation; do
-    begin_case "an accepted failed release uses pending copy in $path"
-    start_mock "$(happy_scenario "$rid" | jq --arg id "$rid" 'del(.report) | .statuses = [{release_id: $id, status: "failed", failure: "**Pending:** the report for this release follows."}]')" || { end_case; continue; }
+    begin_case "an accepted failed release uses $body copy in $path"
+    scenario="$(happy_scenario "$rid" | jq --slurpfile failed "$TESTDIR/fixtures/failed-status.json" --arg body "$body" '
+      del(.report) | .statuses = [$failed[0] | if $body == "no-message" then del(.failure) else . end]')"
+    start_mock "$scenario" || { end_case; continue; }
     setup_env; make_repos
     case "$path" in
       polling) run_step resolve_inputs.sh; run_step run_release.sh; check_exit "failed polling remains red" 1 "$STEP_EXIT" ;;
@@ -2470,13 +2518,73 @@ case_pending_failure_copy_paths() {
         seed_pending_release "$rid" 2.30.0 "2026-08-15T08:25:59.868Z"
         export VERGING_MODE=sync
         run_step resolve_inputs.sh; run_step reconcile.sh; check_exit "reconciliation remains green" 0 "$STEP_EXIT"
-        check_grep "reconciliation summary uses pending copy" "$copy" "$GITHUB_STEP_SUMMARY"
+        check_eq "reconciliation summary prints the customer copy as its own line" 1 \
+          "$(grep -cxF -- "$copy" "$GITHUB_STEP_SUMMARY" || true)"
+        check_grep "reconciliation still records a failed row" "| Failed:" "$WORKSPACE/$FOLDER/releases/index.md"
         ;;
     esac
-    check_grep "failure message describes pending and the final report" "$copy" "$CASE_TMP/run.log"
+    check_eq "the run log prints the customer copy as its own line" 1 \
+      "$(grep -cxF -- "$copy" "$CASE_TMP/run.log" || true)"
+    check_no_grep "the Action makes no promise of a later report" "This release is pending. The final report will include the result." "$CASE_TMP/run.log"
+    check_no_grep "the summary makes no promise of a later report" "This release is pending. The final report will include the result." "$GITHUB_STEP_SUMMARY"
     check_no_grep "failure log makes no blanket voiding claim" "voided tests are never billed" "$CASE_TMP/run.log"
     check_no_grep "failure summary makes no blanket voiding claim" "voided tests are never billed" "$GITHUB_STEP_SUMMARY"
     check_no_path "failure handling still clears the pending entry" "$WORKSPACE/$FOLDER/releases/pending.json"
+    check_no_path "no release report is written on failure" "$WORKSPACE/$FOLDER/releases/2026-08-15-2.30.0"
+    check_no_path "no latest report is written on failure" "$WORKSPACE/$FOLDER/latest"
+    local posts=0
+    [ "$path" != polling ] || posts=1
+    check_eq "failure messaging preserves submission count" "$posts" \
+      "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
+    end_case
+  done
+  done
+}
+
+case_latest_no_date_strict_shell() {
+  local old="run_20260815_aaaaaaaaaaaa" newer="run_20260815_bbbbbbbbbbbb" index expected today
+  for index in missing no-match many-matches; do
+    begin_case "a no-date report with a $index index survives strict shell settings"
+    start_mock "$(latest_pair_scenario "$old" "$newer" "2026-08-15T08:25:59.868Z" "2026-08-15T09:25:59.868Z" \
+      | jq --arg old "$old" --arg new "$newer" '.status_code_by_id = {($old): [503], ($new): [503]}')" || { end_case; continue; }
+    setup_env; make_repos
+    run_step resolve_inputs.sh; check_exit "inputs resolve" 0 "$STEP_EXIT"
+    mkdir -p "$WORKSPACE/$FOLDER/latest" "$WORKSPACE/$FOLDER/releases/no-date"
+    jq -n --arg id "$newer" '{release_id: $id}' > "$WORKSPACE/$FOLDER/latest/release.json"
+    printf 'current report\n' > "$WORKSPACE/$FOLDER/latest/REPORT.md"
+    jq -n --arg id "$old" '{release_id: $id}' > "$WORKSPACE/$FOLDER/releases/no-date/release.json"
+    printf 'candidate report\n' > "$WORKSPACE/$FOLDER/releases/no-date/REPORT.md"
+    today="$(date -u +%Y-%m-%d)"
+    expected="$old"
+    if [ "$index" != missing ]; then
+      printf '| %s | 2.31.0 | [%s](current/REPORT.md) | Ready | final |\n' "$today" "$newer" \
+        > "$WORKSPACE/$FOLDER/releases/index.md"
+    fi
+    if [ "$index" = many-matches ]; then
+      # Enough matching rows to fill a pipe; the first matching date wins.
+      python3 - "$WORKSPACE/$FOLDER/releases/index.md" "$old" "$today" <<'PY'
+import sys
+with open(sys.argv[1], 'a') as index:
+    index.write(f'| 2026-08-15 | 2.30.0 | [{sys.argv[2]}](no-date/REPORT.md) | Ready | final |\n')
+    for _ in range(4096):
+        index.write(f'| {sys.argv[3]} | 2.30.0 | [{sys.argv[2]}](no-date/REPORT.md) | Ready | final |\n')
+PY
+      expected="$newer"
+    fi
+    (
+      cd "$WORKSPACE"
+      set -euo pipefail
+      source "$ROOT/scripts/lib.sh"
+      refresh_latest "$FOLDER" "$FOLDER/releases/no-date"
+      echo 'refresh_latest returned under strict shell settings'
+    ) >> "$CASE_TMP/run.log" 2>&1
+    check_exit "no missing match or broken pipe terminates the call" 0 "$?"
+    check_grep "the caller survives the refresh" 'refresh_latest returned under strict shell settings' "$CASE_TMP/run.log"
+    check_eq "the existing date fallback decides latest" "$expected" \
+      "$(jq -r '.release_id' "$WORKSPACE/$FOLDER/latest/release.json")"
+    check_api_artifacts
+    check_eq "a receipt lookup fallback submits nothing" 0 \
+      "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
     end_case
   done
 }
@@ -2537,6 +2645,7 @@ case_latest_missing_key_fails
 case_latest_older_correction
 case_latest_remote_during_push
 case_pending_failure_copy_paths
+case_latest_no_date_strict_shell
 )
 
 # Optional case names keep local test batches small; CI runs every case.

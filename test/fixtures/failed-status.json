@@ -1,0 +1,19 @@
+{
+  "release_id": "run_20260815_aaaaaaaaaaaa",
+  "vendor_version": "2.30.0",
+  "scope": {
+    "suites": [
+      "core-recall"
+    ]
+  },
+  "received_at": "2026-08-15T08:25:59.868Z",
+  "status": "failed",
+  "failure": "**Pending:** the report for this release follows.",
+  "environments": {
+    "count": 1,
+    "agent_setups": [],
+    "suites": [
+      "Core Recall"
+    ]
+  }
+}

@@ -66,9 +66,8 @@ git_config_identity() {
 #
 #   display-name rule, for product_name and the environment (agent setup)
 #   name. The slug charset PLUS single internal spaces, so institutional
-#   names like "Claude Code Opus 5" and "Hermes GPT-5.6 Luna" are accepted (ruled by
-#   #472 D6 A). No leading or trailing space, no doubled space, still no
-#   leading hyphen, still 1 to 64 characters.
+#   names with internal spaces are accepted. No leading or trailing space,
+#   no doubled space, still no leading hyphen, still 1 to 64 characters.
 #
 # The environment name becomes a directory: the API lowercases it and turns
 # spaces into hyphens to get the agent-setup slug that names the evidence
@@ -527,8 +526,9 @@ refresh_latest() {
         case "$release_date" in
           [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
           *)
-            release_date="$(grep -F "[$candidate](" "$folder/releases/index.md" 2>/dev/null | head -n 1 \
-              | awk -F'|' '{gsub(/^ +| +$/, "", $2); print $2}')"
+            release_date="$(awk -F'|' -v marker="[$candidate](" \
+              'index($0, marker) {gsub(/^ +| +$/, "", $2); print $2; exit}' \
+              "$folder/releases/index.md" 2>/dev/null || true)"
             ;;
         esac
         [ -n "$release_date" ] || release_date="$(date -u +%Y-%m-%d)"
@@ -554,13 +554,25 @@ ensure_folder_readme() {
 }
 
 # The status code is a machine signal for a charged onboarding that Verging
-# holds while fixing it. Other accepted failed releases use pending copy.
+# holds while fixing it. Other accepted failed releases use the API's text.
 print_held_onboarding_copy() {
   if jq -e '.failure_code == "onboarding_held_ours"' "$1" >/dev/null 2>&1; then
     echo "Something went wrong while running this activation. It is on hold while we fix it, and we will deliver your results at no extra charge."
     return 0
   fi
   return 1
+}
+
+# print_failed_release_copy FILE: the API owns customer wording for failures.
+# Its failure field is customer-facing; absent text gets a neutral fallback.
+print_failed_release_copy() {
+  local copy
+  copy="$(jq -r '.failure | select(type == "string") | select(test("\\S"))' "$1" 2>/dev/null)" || copy=""
+  if [ -n "$copy" ]; then
+    printf '%s\n' "$copy"
+  else
+    echo "Testing did not finish for this release; its status is failed."
+  fi
 }
 
 # poll_release RELEASE_ID TIMEOUT_MINUTES: poll the status until the report
@@ -596,7 +608,7 @@ poll_release() {
           failure="$(jq -r '.failure // "(no failure field on the status body)"' "$status_file")"
           echo "::error::release $id failed on the Verging side: $failure"
           if ! print_held_onboarding_copy "$status_file"; then
-            echo "This release is pending. The final report will include the result."
+            print_failed_release_copy "$status_file"
           fi
           {
             echo "**Release failed.** \`$id\`"
@@ -670,7 +682,7 @@ fetch_and_write() {
   used_activation_id="$(jq -r '.diff.activation_id // empty' "$report")"
   if [ -n "$used_activation_id" ]; then
     # An id this workflow sent is named as such; one the release picked up from
-    # the setup on its own is the current setup's (Matt, 2026-09-30, #1124).
+    # the setup on its own is the current setup's.
     used_label="current setup"
     [ -n "$requested_activation_id" ] && [ "$requested_activation_id" = "$used_activation_id" ] && used_label="sent by this workflow"
     echo "Activation id used: $used_activation_id ($used_label)"
@@ -922,8 +934,10 @@ resolve_folder_conflicts() {
       && [ -n "$id" ] && [ "$(committed_release_id REBASE_HEAD "$folder/latest/release.json")" = "$id" ] \
       && [ -z "$(remote_report_dir "$folder" "$id" "$branch")" ] \
       && [ -f "$folder/releases/$(state_get slug)/release.json" ]; then
-    echo "  latest/ is refreshed from this job's release, the newest on record"
     refresh_latest "$folder" "$folder/releases/$(state_get slug)"
+    if [ "$(jq -r '.release_id // empty' "$folder/latest/release.json" 2>/dev/null)" = "$id" ]; then
+      echo "  latest/ is refreshed from this job's release, the newest on record"
+    fi
   fi
   git add -A -- "$folder"
 }

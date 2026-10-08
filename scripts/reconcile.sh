@@ -115,7 +115,7 @@ for id in $(pending_ids "$folder"); do
       failure="$(jq -r '.failure // "(no failure field on the status body)"' "$status_file")"
       echo "::warning::release $id ($version) failed on the Verging side: $failure."
       if ! print_held_onboarding_copy "$status_file"; then
-        echo "This release is pending. The final report will include the result."
+        print_failed_release_copy "$status_file"
       fi
       row_failure="$(printf '%s' "$failure" | tr '\n|' ' /')"
       index_put_row "$folder" "$id" "| $release_date | $version | $id | Failed: $row_failure | failed |"
@@ -126,7 +126,7 @@ for id in $(pending_ids "$folder"); do
         echo
         echo "The failure is on its row in \`$releases_dir/index.md\`; the release is no longer pending."
         if print_held_onboarding_copy "$status_file"; then :; else
-          echo "This release is pending. The final report will include the result."
+          print_failed_release_copy "$status_file"
         fi
         echo
       } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"

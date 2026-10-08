@@ -2143,14 +2143,14 @@ case_held_report_ready_paths() {
 latest_pair_scenario() { # older id, newer id, older time, newer time
   jq -n --argjson old "$(happy_scenario "$1")" --argjson new "$(happy_scenario "$2")" \
     --arg old_at "$3" --arg new_at "$4" '{
-      receipt: $new.receipt + {received_at: $new_at},
+      receipt: ($new.receipt + {received_at: $new_at}),
       require_authorization: true,
       status_by_id: {
         ($old.receipt.release_id): [$old.statuses[-1] + {received_at: $old_at}],
         ($new.receipt.release_id): [$new.statuses[-1] + {received_at: $new_at}]
       },
       report_by_id: {
-        ($old.receipt.release_id): $old.report + {vendor_version: "2.30.0"},
+        ($old.receipt.release_id): ($old.report + {vendor_version: "2.30.0"}),
         ($new.receipt.release_id): $new.report
       }
     }'

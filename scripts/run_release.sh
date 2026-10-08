@@ -62,7 +62,7 @@ if [ -n "$fetch_only" ]; then
       failure="$(jq -r '.failure // "(no failure field on the status body)"' "$status_file")"
       echo "::error::release $id failed on the Verging side: $failure"
       if ! print_held_onboarding_copy "$status_file"; then
-        echo "The release is voided; voided tests are never billed. Start a new release, or send the release_id to contact@verginglabs.com."
+        echo "This release is pending. The final report will include the result."
       fi
       exit 1
       ;;

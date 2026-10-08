@@ -11,6 +11,10 @@ Reads its script from $MOCK_DIR/scenario.json:
   statuses       list of status bodies for GET /v1/releases/{id},
                  served in order, last one sticky
   status_by_id   optional map of release id to its own status list
+  status_code_by_id  optional map of release id to HTTP status lists
+  status_raw_by_id   optional map of release id to raw body lists; null
+                     uses the normal JSON body
+  require_authorization  refuse requests without the synthetic test key
   report         the body for GET /v1/releases/{id}/report
   report_by_id   optional map of release id to its own report body
 
@@ -70,13 +74,22 @@ class Handler(BaseHTTPRequestHandler):
         headers = {k.lower(): v for k, v in self.headers.items() if k.lower() != "authorization"}
         with open(os.path.join(MOCK_DIR, "requests.log"), "a") as f:
             f.write(json.dumps({"method": self.command, "path": self.path, "body": body,
+                                "authorized": self.headers.get("Authorization") == "Bearer test-key",
                                 "headers": headers}) + "\n")
+
+    def _authorized(self, sc):
+        if sc.get("require_authorization") and self.headers.get("Authorization") != "Bearer test-key":
+            self._send(401, {"error": "missing test authorization"})
+            return False
+        return True
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length).decode() if length else ""
         self._record(body)
         sc = load_scenario()
+        if not self._authorized(sc):
+            return
         if self.path == "/v1/releases":
             if "expected_post_activation_id" in sc:
                 try:
@@ -101,6 +114,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self._record("")
         sc = load_scenario()
+        if not self._authorized(sc):
+            return
         parts = self.path.strip("/").split("/")
         if len(parts) >= 3 and parts[0] == "v1" and parts[1] == "releases":
             rid = parts[2]
@@ -122,7 +137,19 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 n = bump("status-" + rid)
                 idx = min(n, len(statuses)) - 1
-                self._send(200, statuses[idx])
+                codes = sc.get("status_code_by_id", {}).get(rid, [200])
+                code = codes[min(n, len(codes)) - 1]
+                raw_bodies = sc.get("status_raw_by_id", {}).get(rid, [None])
+                raw = raw_bodies[min(n, len(raw_bodies)) - 1]
+                if raw is not None:
+                    data = raw.encode()
+                    self.send_response(code)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                else:
+                    self._send(code, statuses[idx])
                 return
         self._send(404, {"error": "unknown path", "fix": "check the path"})
 

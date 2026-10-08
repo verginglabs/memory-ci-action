@@ -81,9 +81,7 @@ take_committed_report() {
   rm -rf "$dir"
   mkdir -p "$dir"
   cp -R "$mine/." "$dir/"
-  if [ "$(jq -r '.release_id // empty' "$folder/latest/release.json" 2>/dev/null)" = "$release_id" ]; then
-    refresh_latest "$folder" "$dir"
-  fi
+  refresh_latest "$folder" "$dir"
   own_row="$(grep -F -e "[$release_id](" -e "| $release_id |" "$aside/releases/index.md" 2>/dev/null | head -n 1 || true)"
   [ -n "$own_row" ] && index_put_row "$folder" "$release_id" "$own_row"
   pending_clear "$folder" "$release_id"

@@ -514,7 +514,7 @@ case_failed() {
   run_step run_release.sh
   check_exit "run_release exits 1 on failed" 1 "$STEP_EXIT"
   check_grep "the failure text is printed" "we could not reach your endpoint from the agent environment" "$CASE_TMP/run.log"
-  check_grep "the voided copy is printed" "The release is voided; voided tests are never billed." "$CASE_TMP/run.log"
+  check_grep "the pending copy is printed" "This release is pending. The final report will include the result." "$CASE_TMP/run.log"
   check_no_path "no report written on a failed release" "$WORKSPACE/$FOLDER/latest"
   check_no_path "no index written on a failed release" "$WORKSPACE/$FOLDER/releases/index.md"
   check_no_path "no pending record is left for a failed release" "$WORKSPACE/$FOLDER/releases/pending.json"
@@ -1839,7 +1839,7 @@ case_pending_running_then_failed() {
   run_step reconcile.sh;       check_exit "reconcile exits 0 on a failed pending release: no red job" 0 "$STEP_EXIT"
   check_no_grep "no error anywhere in the job" "::error::" "$CASE_TMP/run.log"
   check_grep "the failure is a warning with the failure text" "::warning::release $rid (2.31.0) failed on the Verging side: we could not reach your endpoint from the agent environment" "$CASE_TMP/run.log"
-  check_grep "the voided copy is printed" "The release is voided; voided tests are never billed." "$CASE_TMP/run.log"
+  check_grep "the pending copy is printed" "This release is pending. The final report will include the result." "$CASE_TMP/run.log"
   check_no_path "the pending record is cleared" "$pending"
   check_grep "the index notes the failure on the release's own row" "| 2026-08-15 | 2.31.0 | $rid | Failed: we could not reach your endpoint from the agent environment | failed |" "$WORKSPACE/$FOLDER/releases/index.md"
   check_no_path "no release directory for a failed release" "$WORKSPACE/$FOLDER/releases/2026-08-15-2.31.0"
@@ -1978,6 +1978,7 @@ case_pending_older_than_latest() {
   check_eq "the index stays oldest first" "1" \
     "$([ "$(grep -nF "[$old](" "$index" | cut -d: -f1)" -lt "$(grep -nF "[$newer](" "$index" | cut -d: -f1)" ] && echo 1 || echo 0)"
   check_eq "latest/ stays with the newer release" "$newer" "$(jq -r '.release_id' "$WORKSPACE/$FOLDER/latest/release.json")"
+  check_no_grep "summary does not claim the older report is copied to latest" "(copy in \`$FOLDER/latest/REPORT.md\`)" "$GITHUB_STEP_SUMMARY"
   check_grep "the log says why latest/ was left" "latest/ left as it is: a newer release's report is already on record." "$CASE_TMP/run.log"
   check_no_path "the pending record is cleared" "$WORKSPACE/$FOLDER/releases/pending.json"
   check_grep "the newer release's preliminary report is left in place (no final yet)" "The final report for $newer is not out yet" "$CASE_TMP/run.log"
@@ -2095,10 +2096,396 @@ case_held_report_ready_paths() {
   end_case
 }
 
+# ---------- latest/ follows submission order on every collection path ----------
+
+latest_pair_scenario() { # older id, newer id, older time, newer time
+  jq -n --argjson old "$(happy_scenario "$1")" --argjson new "$(happy_scenario "$2")" \
+    --arg old_at "$3" --arg new_at "$4" '{
+      receipt: $new.receipt + {received_at: $new_at},
+      require_authorization: true,
+      status_by_id: {
+        ($old.receipt.release_id): [$old.statuses[-1] + {received_at: $old_at}],
+        ($new.receipt.release_id): [$new.statuses[-1] + {received_at: $new_at}]
+      },
+      report_by_id: {
+        ($old.receipt.release_id): $old.report + {vendor_version: "2.30.0"},
+        ($new.receipt.release_id): $new.report
+      }
+    }'
+}
+
+select_pair_receipt() { # release id, version
+  jq --arg rid "$1" '.receipt.release_id = $rid
+    | .receipt.received_at = .status_by_id[$rid][0].received_at
+    | .receipt.status_url = ("/v1/releases/" + $rid)' "$MOCK_DIR/scenario.json" > "$MOCK_DIR/next.json"
+  mv "$MOCK_DIR/next.json" "$MOCK_DIR/scenario.json"
+  export VERGING_VENDOR_VERSION="$2"
+}
+
+check_pair_collected() { # latest id, expected POST count
+  check_eq "latest holds the newest collected release" "$1" \
+    "$(jq -r '.release_id' "$WORKSPACE/$FOLDER/latest/release.json")"
+  check_eq "both release directories exist" "2" \
+    "$(find "$WORKSPACE/$FOLDER/releases" -mindepth 2 -maxdepth 2 -name release.json | wc -l)"
+  check_eq "both index rows exist once" "2" "$(grep -c '^| 2026-' "$WORKSPACE/$FOLDER/releases/index.md")"
+  check_no_path "both reports cleared their pending entries" "$WORKSPACE/$FOLDER/releases/pending.json"
+  check_eq "submission count is unchanged by collection" "$2" \
+    "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
+}
+
+case_latest_pending_order() {
+  local old="run_20260815_aaaaaaaaaaaa" newer="run_20260815_bbbbbbbbbbbb"
+  local order first second first_version second_version old_at
+  for order in newer-first older-first earlier-day-newer-first earlier-day-older-first; do
+    old_at="2026-08-15T08:25:59.868Z"
+    case "$order" in earlier-day-*) old_at="2026-08-14T08:25:59.868Z" ;; esac
+    begin_case "pending reports collected $order keep latest on the newer submission"
+    start_mock "$(latest_pair_scenario "$old" "$newer" "$old_at" "2026-08-15T09:25:59.868Z")" || { end_case; continue; }
+    setup_env; make_repos
+    if [[ "$order" = *newer-first ]]; then
+      first="$newer"; first_version=2.31.0; second="$old"; second_version=2.30.0
+    else
+      first="$old"; first_version=2.30.0; second="$newer"; second_version=2.31.0
+    fi
+    select_pair_receipt "$first" "$first_version"
+    run_step resolve_inputs.sh; run_step run_release.sh; check_exit "first report is collected" 0 "$STEP_EXIT"
+    run_step commit_push.sh; check_exit "first report is committed" 0 "$STEP_EXIT"
+    seed_pending_release "$second" "$second_version" "$(jq -r --arg id "$second" '.status_by_id[$id][0].received_at' "$MOCK_DIR/scenario.json")"
+    new_job
+    export VERGING_MODE=sync
+    run_step resolve_inputs.sh; run_step reconcile.sh; check_exit "pending report is collected" 0 "$STEP_EXIT"
+    check_pair_collected "$newer" 1
+    check_eq "sync pushes the same latest release" "$newer" \
+      "$(git -C "$ORIGIN" show "main:$FOLDER/latest/release.json" | jq -r '.release_id')"
+    end_case
+  done
+}
+
+case_latest_normal_order() {
+  local old="run_20260815_aaaaaaaaaaaa" newer="run_20260815_bbbbbbbbbbbb" first order
+  for order in newer-first older-first; do
+    begin_case "normal same-day releases submitted $order keep latest on the newer submission"
+    start_mock "$(latest_pair_scenario "$old" "$newer" "2026-08-15T08:25:59.868Z" "2026-08-15T09:25:59.868Z")" || { end_case; continue; }
+    setup_env; make_repos
+    first="$newer"; [ "$order" = "older-first" ] && first="$old"
+    select_pair_receipt "$first" 2.31.0
+    run_step resolve_inputs.sh; run_step run_release.sh; run_step commit_push.sh
+    check_exit "first normal release is committed" 0 "$STEP_EXIT"
+    new_job
+    export GITHUB_RUN_ID=4343
+    if [ "$first" = "$old" ]; then select_pair_receipt "$newer" 2.31.0; else select_pair_receipt "$old" 2.30.0; fi
+    run_step resolve_inputs.sh; run_step run_release.sh; check_exit "second normal release is collected" 0 "$STEP_EXIT"
+    run_step commit_push.sh; check_exit "second normal release is committed" 0 "$STEP_EXIT"
+    check_pair_collected "$newer" 2
+    end_case
+  done
+}
+
+case_latest_fetch_only_older() {
+  begin_case "an explicit fetch of an older same-day release keeps latest on the newer submission"
+  local old="run_20260815_aaaaaaaaaaaa" newer="run_20260815_bbbbbbbbbbbb"
+  start_mock "$(latest_pair_scenario "$old" "$newer" "2026-08-15T08:25:59.868Z" "2026-08-15T09:25:59.868Z")" || { end_case; return; }
+  setup_env; make_repos
+  run_step resolve_inputs.sh; run_step run_release.sh; run_step commit_push.sh
+  new_job
+  export VERGING_FETCH_ONLY_RELEASE_ID="$old"
+  run_step resolve_inputs.sh; run_step reconcile.sh; run_step run_release.sh
+  check_exit "older explicit fetch succeeds" 0 "$STEP_EXIT"
+  run_step commit_push.sh; check_exit "older report is committed" 0 "$STEP_EXIT"
+  check_pair_collected "$newer" 1
+  check_no_grep "summary does not claim the older report is copied to latest" "(copy in \`$FOLDER/latest/REPORT.md\`)" "$GITHUB_STEP_SUMMARY"
+  end_case
+}
+
+case_latest_final_refresh() {
+  begin_case "the current release turning final refreshes latest even when time lookups are refused"
+  local old="run_20260815_aaaaaaaaaaaa" newer="run_20260815_bbbbbbbbbbbb" before
+  start_mock "$(latest_pair_scenario "$old" "$newer" "2026-08-15T08:25:59.868Z" "2026-08-15T09:25:59.868Z")" || { end_case; return; }
+  setup_env; make_repos
+  run_step resolve_inputs.sh; run_step run_release.sh; run_step commit_push.sh
+  before="$(cat "$MOCK_DIR/status-$newer.count")"
+  jq --arg id "$newer" --arg md "$(make_report_md "Larkspur 2.31.0" "Ready" "Final report")" \
+    '.report_by_id[$id].diff.stage = "final" | .report_by_id[$id].status = "corrected"
+     | .report_by_id[$id].report_markdown = $md | .status_code_by_id = {($id): [503]}' \
+    "$MOCK_DIR/scenario.json" > "$MOCK_DIR/next.json"
+  mv "$MOCK_DIR/next.json" "$MOCK_DIR/scenario.json"
+  new_job; export VERGING_MODE=sync
+  run_step resolve_inputs.sh; run_step reconcile.sh; check_exit "current final report is reconciled" 0 "$STEP_EXIT"
+  check_eq "latest now holds the final" "final" "$(jq -r '.stage' "$WORKSPACE/$FOLDER/latest/diff.json")"
+  check_eq "same-release refresh needs no time lookup" "$before" "$(cat "$MOCK_DIR/status-$newer.count")"
+  check_dirs_equal "latest remains a complete copy" "$WORKSPACE/$FOLDER/releases/2026-08-15-2.31.0" "$WORKSPACE/$FOLDER/latest"
+  end_case
+}
+
+case_latest_missing_copy_on_correction() {
+  local rid="run_20260815_bbbbbbbbbbbb" path initial
+  for path in reconciliation commit-update; do
+    begin_case "a missing latest copy is restored by $path of a final report"
+    start_mock "$(happy_scenario "$rid" | jq '.statuses = [.statuses[-1]] | .statuses[0].received_at = .receipt.received_at')" || { end_case; continue; }
+    setup_env; make_repos
+    initial="$(git -C "$WORKSPACE" rev-parse HEAD)"
+    run_step resolve_inputs.sh; run_step run_release.sh; run_step commit_push.sh
+    git -C "$WORKSPACE" rm -rq -- "$FOLDER/latest"
+    git -C "$WORKSPACE" commit -qm "remove the latest copy"
+    git -C "$WORKSPACE" push -q origin HEAD:main
+    jq --arg md "$(make_report_md "Larkspur 2.31.0" "Ready" "Final report")" \
+      '.report.diff.stage = "final" | .report.status = "corrected" | .report.report_markdown = $md
+       | .statuses[0].status = "corrected"' "$MOCK_DIR/scenario.json" > "$MOCK_DIR/next.json"
+    mv "$MOCK_DIR/next.json" "$MOCK_DIR/scenario.json"
+    if [ "$path" = reconciliation ]; then
+      new_job; export VERGING_MODE=sync
+      run_step resolve_inputs.sh; run_step reconcile.sh
+    else
+      rerun_from "$initial"; export VERGING_FETCH_ONLY_RELEASE_ID="$rid"
+      run_step resolve_inputs.sh; run_step run_release.sh; run_step commit_push.sh
+    fi
+    check_exit "the final report update succeeds" 0 "$STEP_EXIT"
+    check_file "latest gains the final report" "$WORKSPACE/$FOLDER/latest/diff.json"
+    check_eq "latest is final" "final" "$(jq -r '.stage' "$WORKSPACE/$FOLDER/latest/diff.json" 2>/dev/null)"
+    check_eq "correction submits no second release" 1 "$(jq -rs '[.[] | select(.method == "POST")] | length' "$MOCK_DIR/requests.log")"
+    end_case
+  done
+}
+
+case_latest_equal_and_precise_times() {
+  local old="run_20260815_aaaaaaaaaaaa" newer="run_20260815_bbbbbbbbbbbb" times old_at new_at
+  for times in equal offset-equal fractional; do
+    case "$times" in
+      equal) old_at="2026-08-15T08:25:59.868Z"; new_at="$old_at" ;;
+      offset-equal) old_at="2026-08-15T10:25:59.868+02:00"; new_at="2026-08-15T08:25:59.868Z" ;;
+      fractional) old_at="2026-08-15T08:25:59.8Z"; new_at="2026-08-15T08:25:59.801Z" ;;
+    esac
+    begin_case "$times receipt times keep latest when the candidate is no later"
+    start_mock "$(latest_pair_scenario "$old" "$newer" "$old_at" "$new_at")" || { end_case; continue; }
+    setup_env; make_repos
+    run_step resolve_inputs.sh; run_step run_release.sh; run_step commit_push.sh
+    new_job; export VERGING_FETCH_ONLY_RELEASE_ID="$old"
+    run_step resolve_inputs.sh; run_step run_release.sh; check_exit "candidate report is collected" 0 "$STEP_EXIT"
+    check_pair_collected "$newer" 1
+    end_case
+  done
+}
+
+case_latest_lookup_fallback() {
+  local old="run_20260815_aaaaaaaaaaaa" newer="run_20260815_bbbbbbbbbbbb" day reason old_at expected
+  for day in same-day earlier-day; do
+    old_at="2026-08-15T08:25:59.868Z"; expected="$old"
+    if [ "$day" = earlier-day ]; then old_at="2026-08-14T08:25:59.868Z"; expected="$newer"; fi
+    for reason in refused candidate-missing current-missing invalid-time unreadable-body; do
+      begin_case "$reason receipt lookup uses the existing $day date rule"
+      start_mock "$(latest_pair_scenario "$old" "$newer" "$old_at" "2026-08-15T09:25:59.868Z")" || { end_case; continue; }
+      setup_env; make_repos
+      run_step resolve_inputs.sh; run_step run_release.sh; run_step commit_push.sh
+      new_job; select_pair_receipt "$old" 2.30.0
+      jq --arg old "$old" --arg new "$newer" --arg reason "$reason" '
+        if $reason == "refused" then .status_code_by_id = {($old): [200, 503], ($new): [503]}
+        elif $reason == "candidate-missing" then del(.status_by_id[$old][0].received_at)
+        elif $reason == "current-missing" then del(.status_by_id[$new][0].received_at)
+        elif $reason == "invalid-time" then .status_by_id[$new][0].received_at = "not a timestamp"
+        else .status_raw_by_id = {($new): ["not JSON"]} end' "$MOCK_DIR/scenario.json" > "$MOCK_DIR/next.json"
+      mv "$MOCK_DIR/next.json" "$MOCK_DIR/scenario.json"
+      run_step resolve_inputs.sh; run_step run_release.sh; check_exit "lookup failure does not lose the report" 0 "$STEP_EXIT"
+      check_pair_collected "$expected" 2
+      end_case
+    done
+  done
+}
+
+case_latest_missing_id() {
+  begin_case "latest without a release id is replaced without time lookups"
+  local rid="run_20260815_bbbbbbbbbbbb"
+  start_mock "$(happy_scenario "$rid" | jq '.statuses = [.statuses[-1]]')" || { end_case; return; }
+  setup_env; make_repos
+  mkdir -p "$WORKSPACE/$FOLDER/latest"
+  printf '{}\n' > "$WORKSPACE/$FOLDER/latest/release.json"
+  printf 'stale\n' > "$WORKSPACE/$FOLDER/latest/stale.txt"
+  run_step resolve_inputs.sh; run_step run_release.sh; check_exit "report is collected" 0 "$STEP_EXIT"
+  check_eq "latest gains the release id" "$rid" "$(jq -r '.release_id' "$WORKSPACE/$FOLDER/latest/release.json")"
+  check_no_path "stale latest files are removed" "$WORKSPACE/$FOLDER/latest/stale.txt"
+  check_eq "only the readiness status is requested" "1" "$(cat "$MOCK_DIR/status-$rid.count")"
+  end_case
+}
+
+case_latest_missing_key_fails() {
+  begin_case "a missing API key cannot quietly select the date fallback"
+  local old="run_20260815_aaaaaaaaaaaa" newer="run_20260815_bbbbbbbbbbbb"
+  start_mock "$(latest_pair_scenario "$old" "$newer" "2026-08-15T08:25:59.868Z" "2026-08-15T09:25:59.868Z")" || { end_case; return; }
+  setup_env; make_repos
+  run_step resolve_inputs.sh; run_step run_release.sh; run_step commit_push.sh
+  new_job; export VERGING_FETCH_ONLY_RELEASE_ID="$old"
+  run_step resolve_inputs.sh; run_step run_release.sh
+  # Use the real collected directories and restore the newer latest copy to
+  # make the missing-key assertion independent of the ordering assertion.
+  cp -R "$WORKSPACE/$FOLDER/releases/2026-08-15-2.31.0"/. "$WORKSPACE/$FOLDER/latest/"
+  (
+    unset VERGING_API_KEY
+    cd "$WORKSPACE"
+    source "$ROOT/scripts/lib.sh"
+    refresh_latest "$FOLDER" "$FOLDER/releases/2026-08-15-2.30.0"
+  ) >> "$CASE_TMP/run.log" 2>&1
+  check_exit "missing authentication is an error" 1 "$?"
+  check_grep "the error names the required environment variable" "VERGING_API_KEY is not set" "$CASE_TMP/run.log"
+  check_eq "latest is untouched on the missing-key error" "$newer" "$(jq -r '.release_id' "$WORKSPACE/$FOLDER/latest/release.json")"
+  end_case
+}
+
+case_latest_older_correction() {
+  begin_case "a corrected older report updates its committed directory while latest keeps the newer report"
+  local old="run_20260815_aaaaaaaaaaaa" newer="run_20260815_bbbbbbbbbbbb" initial before
+  start_mock "$(latest_pair_scenario "$old" "$newer" "2026-08-15T08:25:59.868Z" "2026-08-15T09:25:59.868Z")" || { end_case; return; }
+  setup_env; make_repos
+  initial="$(git -C "$WORKSPACE" rev-parse HEAD)"
+  select_pair_receipt "$old" 2.30.0
+  run_step resolve_inputs.sh; run_step run_release.sh; run_step commit_push.sh
+  new_job; select_pair_receipt "$newer" 2.31.0
+  run_step resolve_inputs.sh; run_step run_release.sh; run_step commit_push.sh
+  check_exit "both preliminary reports are committed" 0 "$STEP_EXIT"
+  before="$(git -C "$ORIGIN" rev-parse "main:$FOLDER/latest")"
+  jq --arg id "$old" --arg md "$(make_report_md "Larkspur 2.30.0" "Ready" "Final report")" \
+    '.report_by_id[$id].diff.stage = "final" | .report_by_id[$id].status = "corrected"
+    | .report_by_id[$id].report_markdown = $md | .status_by_id[$id][0].status = "corrected"' \
+    "$MOCK_DIR/scenario.json" > "$MOCK_DIR/next.json"
+  mv "$MOCK_DIR/next.json" "$MOCK_DIR/scenario.json"
+  rerun_from "$initial"
+  export VERGING_FETCH_ONLY_RELEASE_ID="$old"
+  run_step resolve_inputs.sh; run_step run_release.sh; check_exit "corrected older report is fetched" 0 "$STEP_EXIT"
+  run_step commit_push.sh; check_exit "existing older report is updated" 0 "$STEP_EXIT"
+  check_grep "the earlier committed report is updated in place" "differs from the copy on origin/main" "$CASE_TMP/run.log"
+  check_eq "older report directory now holds its final" "final" "$(jq -r '.stage' "$WORKSPACE/$FOLDER/releases/2026-08-15-2.30.0/diff.json")"
+  check_eq "newer latest files stay byte-identical" "$before" "$(git -C "$ORIGIN" rev-parse "main:$FOLDER/latest")"
+  check_pair_collected "$newer" 2
+  end_case
+}
+
+# Read each step's actual env block. Step-scoped variables are cleared before
+# applying it, so a test-wide API key cannot hide a missing metadata entry.
+run_action_step() {
+  local script="$1" name assignment
+  local step_env=()
+  mapfile -t step_env < <(python3 - "$ROOT/action.yml" "$script" <<'PY'
+import os
+import re
+import sys
+text = open(sys.argv[1]).read()
+blocks = re.split(r"^    - name: ", text, flags=re.M)
+block = next(block for block in blocks if f'/scripts/{sys.argv[2]}"' in block)
+inputs = {
+    'api_key': 'test-key', 'agent_setups': os.environ.get('VERGING_AGENT_SETUPS', ''),
+    'vendor_version': os.environ.get('VERGING_VENDOR_VERSION', ''),
+    'api_base': os.environ['VERGING_API_BASE'], 'poll_timeout_minutes': '0',
+    'folder': os.environ.get('VERGING_FOLDER', ''),
+}
+for name, expression in re.findall(r'^        ([A-Z_]+): (.+)$', block, flags=re.M):
+    source = re.fullmatch(r'\$\{\{ (.+) \}\}', expression).group(1)
+    if source.startswith('inputs.'):
+        value = inputs.get(source.removeprefix('inputs.'), '')
+    elif source == 'github.event.repository.default_branch':
+        value = 'main'
+    elif source == 'github.token':
+        value = 'test-workflow-token'
+    else:
+        raise ValueError(f'unhandled step env source: {source}')
+    print(f'{name}={value}')
+PY
+)
+  (
+    for name in $(compgen -e); do
+      case "$name" in VERGING_*|GH_TOKEN) unset "$name" ;; esac
+    done
+    for assignment in "${step_env[@]}"; do export "$assignment"; done
+    cd "$WORKSPACE" && "$ROOT/scripts/$script"
+  ) >> "$CASE_TMP/run.log" 2>&1
+  STEP_EXIT=$?
+}
+
+case_latest_remote_during_push() {
+  begin_case "a newer same-day report arriving during push stays latest after conflict recovery with real step environments"
+  local old="run_20260815_aaaaaaaaaaaa" newer="run_20260815_bbbbbbbbbbbb" original_runner
+  start_mock "$(latest_pair_scenario "$old" "$newer" "2026-08-15T08:25:59.868Z" "2026-08-15T09:25:59.868Z")" || { end_case; return; }
+  setup_env; make_repos
+  select_pair_receipt "$old" 2.30.0
+  run_action_step resolve_inputs.sh; check_exit "resolve uses its actual environment" 0 "$STEP_EXIT"
+  run_action_step reconcile.sh; check_exit "reconcile uses its actual environment" 0 "$STEP_EXIT"
+  run_action_step run_release.sh; check_exit "local older report is written" 0 "$STEP_EXIT"
+  git clone -q "$ORIGIN" "$CASE_TMP/other"
+  select_pair_receipt "$newer" 2.31.0
+  (
+    WORKSPACE="$CASE_TMP/other"
+    export GITHUB_WORKSPACE="$WORKSPACE" RUNNER_TEMP="$CASE_TMP/other-runner" GITHUB_RUN_ID=4343
+    mkdir -p "$RUNNER_TEMP"
+    run_action_step resolve_inputs.sh
+    [ "$STEP_EXIT" = 0 ] || exit 1
+    run_action_step run_release.sh
+    [ "$STEP_EXIT" = 0 ] || exit 1
+    git -C "$WORKSPACE" config user.name "Customer"
+    git -C "$WORKSPACE" config user.email "customer@example.invalid"
+    git -C "$WORKSPACE" add "$FOLDER"
+    git -C "$WORKSPACE" commit -qm "report for the newer release"
+  )
+  check_exit "remote report is prepared through the real scripts" 0 "$?"
+  export ACTION_REAL_GIT="$(command -v git)" ACTION_OTHER_WORKSPACE="$CASE_TMP/other" ACTION_PUSH_MARKER="$CASE_TMP/incoming-pushed"
+  mkdir -p "$CASE_TMP/bin"
+  cat > "$CASE_TMP/bin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = push ] && [ ! -f "$ACTION_PUSH_MARKER" ]; then
+  : > "$ACTION_PUSH_MARKER"
+  "$ACTION_REAL_GIT" -C "$ACTION_OTHER_WORKSPACE" push -q origin HEAD:main || exit 1
+fi
+exec "$ACTION_REAL_GIT" "$@"
+SH
+  chmod +x "$CASE_TMP/bin/git"
+  (
+    export PATH="$CASE_TMP/bin:$PATH"
+    run_action_step commit_push.sh
+    exit "$STEP_EXIT"
+  )
+  check_exit "commit step recovers with its actual environment" 0 "$?"
+  check_grep "first push races with the incoming report" "Push attempt 1 to main failed" "$CASE_TMP/run.log"
+  check_grep "latest files conflict during rebase" "CONFLICT" "$CASE_TMP/run.log"
+  check_grep "the folder conflict is recovered" "the branch's version of every conflicting file is taken:" "$CASE_TMP/run.log"
+  check_pair_collected "$newer" 2
+  check_eq "the pushed latest stays on the remote's newer report" "$newer" \
+    "$(git -C "$ORIGIN" show "main:$FOLDER/latest/release.json" | jq -r '.release_id')"
+  check_eq "conflict recovery asks for both authenticated receipt times" "2" \
+    "$(jq -rs --arg old "$old" --arg new "$newer" '[.[] | select(.method == "GET" and (.path == ("/v1/releases/" + $old) or .path == ("/v1/releases/" + $new))) | select(.authorized)] | length - 2' "$MOCK_DIR/requests.log")"
+  check_eq "the workspace is clean after the push" "" "$(git -C "$WORKSPACE" status --porcelain)"
+  unset ACTION_REAL_GIT ACTION_OTHER_WORKSPACE ACTION_PUSH_MARKER
+  end_case
+}
+
+case_pending_failure_copy_paths() {
+  local rid="run_20260815_aaaaaaaaaaaa" path
+  local copy="This release is pending. The final report will include the result."
+  for path in polling fetch-only reconciliation; do
+    begin_case "an accepted failed release uses pending copy in $path"
+    start_mock "$(happy_scenario "$rid" | jq --arg id "$rid" 'del(.report) | .statuses = [{release_id: $id, status: "failed", failure: "**Pending:** the report for this release follows."}]')" || { end_case; continue; }
+    setup_env; make_repos
+    case "$path" in
+      polling) run_step resolve_inputs.sh; run_step run_release.sh; check_exit "failed polling remains red" 1 "$STEP_EXIT" ;;
+      fetch-only)
+        export VERGING_FETCH_ONLY_RELEASE_ID="$rid"
+        run_step resolve_inputs.sh; run_step run_release.sh; check_exit "failed explicit fetch remains red" 1 "$STEP_EXIT"
+        ;;
+      reconciliation)
+        seed_pending_release "$rid" 2.30.0 "2026-08-15T08:25:59.868Z"
+        export VERGING_MODE=sync
+        run_step resolve_inputs.sh; run_step reconcile.sh; check_exit "reconciliation remains green" 0 "$STEP_EXIT"
+        check_grep "reconciliation summary uses pending copy" "$copy" "$GITHUB_STEP_SUMMARY"
+        ;;
+    esac
+    check_grep "failure message describes pending and the final report" "$copy" "$CASE_TMP/run.log"
+    check_no_grep "failure log makes no blanket voiding claim" "voided tests are never billed" "$CASE_TMP/run.log"
+    check_no_grep "failure summary makes no blanket voiding claim" "voided tests are never billed" "$GITHUB_STEP_SUMMARY"
+    check_no_path "failure handling still clears the pending entry" "$WORKSPACE/$FOLDER/releases/pending.json"
+    end_case
+  done
+}
+
 say "Verging Memory CI action test harness"
 say "Repository under test: $ROOT"
 export PATH="$TESTDIR/shims:$PATH"
 
+CASES=(
 case_default_poll_contract
 case_default_ready_first
 case_default_failed_first
@@ -2138,6 +2525,31 @@ case_onboarding_activation
 case_current_activation_without_input
 case_held_charged_paths
 case_held_report_ready_paths
+case_latest_pending_order
+case_latest_normal_order
+case_latest_fetch_only_older
+case_latest_final_refresh
+case_latest_missing_copy_on_correction
+case_latest_equal_and_precise_times
+case_latest_lookup_fallback
+case_latest_missing_id
+case_latest_missing_key_fails
+case_latest_older_correction
+case_latest_remote_during_push
+case_pending_failure_copy_paths
+)
+
+# Optional case names keep local test batches small; CI runs every case.
+if [ "$#" -gt 0 ]; then
+  for selected in "$@"; do
+    if [[ " ${CASES[*]} " != *" $selected "* ]]; then
+      say "Unknown test case: $selected"
+      exit 1
+    fi
+  done
+  CASES=("$@")
+fi
+for selected in "${CASES[@]}"; do "$selected"; done
 
 say ""
 say "==============================="

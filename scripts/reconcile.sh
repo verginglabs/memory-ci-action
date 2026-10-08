@@ -80,12 +80,6 @@ for id in $(pending_ids "$folder"); do
     report_ready|corrected)
       print_held_onboarding_copy "$status_file" || true
       echo "The report for $id is ready (status: $status); fetching it."
-      # latest/ stays with a newer release whose report is already on record.
-      latest_mode=""
-      newest="$(index_newest_date "$folder")"
-      if [ -n "$newest" ] && [ "$release_date" \< "$newest" ]; then
-        latest_mode="keep-latest"
-      fi
       # fetch_and_write records the fetched release in the step state. This
       # job's own release, resolved before this pass, must not be replaced by
       # it, so the state is put back afterwards.
@@ -97,7 +91,7 @@ for id in $(pending_ids "$folder"); do
       saved_path="$(state_get report_path)"
       state_set vendor_version "$version"
       written=0
-      if fetch_and_write "$id" "$release_date" $latest_mode; then
+      if fetch_and_write "$id" "$release_date"; then
         written=1
         verdict="$(state_get verdict)"
       fi
@@ -121,7 +115,7 @@ for id in $(pending_ids "$folder"); do
       failure="$(jq -r '.failure // "(no failure field on the status body)"' "$status_file")"
       echo "::warning::release $id ($version) failed on the Verging side: $failure."
       if ! print_held_onboarding_copy "$status_file"; then
-        echo "The release is voided; voided tests are never billed. Start a new release, or send the release_id to contact@verginglabs.com."
+        echo "This release is pending. The final report will include the result."
       fi
       row_failure="$(printf '%s' "$failure" | tr '\n|' ' /')"
       index_put_row "$folder" "$id" "| $release_date | $version | $id | Failed: $row_failure | failed |"
@@ -132,7 +126,7 @@ for id in $(pending_ids "$folder"); do
         echo
         echo "The failure is on its row in \`$releases_dir/index.md\`; the release is no longer pending."
         if print_held_onboarding_copy "$status_file"; then :; else
-          echo "The release is voided; voided tests are never billed."
+          echo "This release is pending. The final report will include the result."
         fi
         echo
       } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
@@ -193,10 +187,7 @@ for rel in "$releases_dir"/*/; do
   index_update_row "$folder" "$id" \
     "| $release_date | $version | [$id]($slug/REPORT.md) | $(verdict_cell "$report" "$verdict") | final |"
 
-  # latest/ is refreshed only when this release is the newest one on record.
-  if [ "$(jq -r '.release_id // empty' "$folder/latest/release.json" 2>/dev/null)" = "$id" ]; then
-    refresh_latest "$folder" "$rel"
-  fi
+  refresh_latest "$folder" "$rel" "$release_date"
 
   if commit_folder "Verging Memory CI: final report for $version ($id)"; then
     echo "Committed the final report for $version ($id): $verdict"

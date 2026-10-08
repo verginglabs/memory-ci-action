@@ -482,12 +482,67 @@ stop_waiting() {
   } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 }
 
-# refresh_latest FOLDER DIR: latest/ is a plain copy of the newest release
-# directory (copied, not symlinked, so it survives every checkout).
+# release_received_time RELEASE_ID: an API receipt time normalized to UTC
+# for comparison, or empty when the response or its timestamp is unreadable.
+# The status body is temporary; nothing is added to the report folder.
+release_received_time() {
+  local id="$1" status_file code received_at normalized=""
+  status_file="$(mktemp "$(state_dir)/latest-status.XXXXXX")" || return 1
+  code="$(api_get "/v1/releases/$id" "$status_file")"
+  if [ "$code" = "200" ]; then
+    received_at="$(jq -er '.received_at | select(type == "string")
+      | select(test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"))' \
+      "$status_file" 2>/dev/null)" || received_at=""
+    if [ -n "$received_at" ]; then
+      normalized="$(date -u -d "$received_at" '+%Y-%m-%dT%H:%M:%S.%NZ' 2>/dev/null)" || normalized=""
+    fi
+  fi
+  rm -f "$status_file"
+  printf '%s' "$normalized"
+}
+
+# refresh_latest FOLDER DIR [RELEASE_DATE]: every writer uses this decision.
+# An empty latest/ or the same release is replaced directly. Other releases
+# are ordered by API receipt time, with ties keeping the existing copy. When
+# either time is unavailable, use the existing index-date rule instead.
+# latest/ stays a plain copy, so it survives every checkout.
 refresh_latest() {
-  rm -rf "$1/latest"
-  mkdir -p "$1/latest"
-  cp -R "$2"/. "$1/latest/"
+  local folder="$1" dir="$2" release_date="${3:-}" current candidate current_time candidate_time newest
+  current="$(jq -r '.release_id // empty' "$folder/latest/release.json" 2>/dev/null || true)"
+  candidate="$(jq -r '.release_id // empty' "$dir/release.json" 2>/dev/null || true)"
+  if [ -n "$current" ] && [ "$candidate" != "$current" ]; then
+    # An omitted step key is a configuration error, not a failed time lookup.
+    : "${VERGING_API_KEY:?VERGING_API_KEY is not set}"
+    candidate_time="$(release_received_time "$candidate")" || candidate_time=""
+    current_time="$(release_received_time "$current")" || current_time=""
+    if [ -n "$candidate_time" ] && [ -n "$current_time" ]; then
+      if [[ "$candidate_time" < "$current_time" || "$candidate_time" = "$current_time" ]]; then
+        echo "latest/ left as it is: the fetched release is no later than the current copy."
+        return 0
+      fi
+    else
+      echo "Submission times are unavailable; latest/ uses the release dates."
+      if [ -z "$release_date" ]; then
+        release_date="$(basename "$dir" | cut -c1-10)"
+        case "$release_date" in
+          [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+          *)
+            release_date="$(grep -F "[$candidate](" "$folder/releases/index.md" 2>/dev/null | head -n 1 \
+              | awk -F'|' '{gsub(/^ +| +$/, "", $2); print $2}')"
+            ;;
+        esac
+        [ -n "$release_date" ] || release_date="$(date -u +%Y-%m-%d)"
+      fi
+      newest="$(index_newest_date "$folder")"
+      if [ -n "$newest" ] && [[ "$release_date" < "$newest" ]]; then
+        echo "latest/ left as it is: a newer release's report is already on record."
+        return 0
+      fi
+    fi
+  fi
+  rm -rf "$folder/latest"
+  mkdir -p "$folder/latest"
+  cp -R "$dir"/. "$folder/latest/"
 }
 
 # ensure_folder_readme FOLDER: the folder README is written once, never
@@ -499,7 +554,7 @@ ensure_folder_readme() {
 }
 
 # The status code is a machine signal for a charged onboarding that Verging
-# holds while fixing it. Ordinary failed releases retain their voided copy.
+# holds while fixing it. Other accepted failed releases use pending copy.
 print_held_onboarding_copy() {
   if jq -e '.failure_code == "onboarding_held_ours"' "$1" >/dev/null 2>&1; then
     echo "Something went wrong while running this activation. It is on hold while we fix it, and we will deliver your results at no extra charge."
@@ -541,7 +596,7 @@ poll_release() {
           failure="$(jq -r '.failure // "(no failure field on the status body)"' "$status_file")"
           echo "::error::release $id failed on the Verging side: $failure"
           if ! print_held_onboarding_copy "$status_file"; then
-            echo "The release is voided; voided tests are never billed. Start a new release, or send the release_id to contact@verginglabs.com."
+            echo "This release is pending. The final report will include the result."
           fi
           {
             echo "**Release failed.** \`$id\`"
@@ -572,14 +627,13 @@ poll_release() {
   done
 }
 
-# fetch_and_write RELEASE_ID RELEASE_DATE [keep-latest]: fetch the report
+# fetch_and_write RELEASE_ID RELEASE_DATE: fetch the report
 # and write the release directory, latest/, the index row, and the folder
 # README, and clear the release from the pending record. Records
-# vendor_version, verdict, slug, and report_path in the step state. With
-# "keep-latest" the latest/ copy is left alone: the reconcile pass passes it
-# when a newer release's report is already on record.
+# vendor_version, verdict, slug, and report_path in the step state.
+# refresh_latest decides whether to replace the latest/ copy.
 fetch_and_write() {
-  local id="$1" release_date="$2" latest_mode="${3:-}"
+  local id="$1" release_date="$2"
   local folder report code vendor_version slug dir verdict stage rstatus due first_report next_activation_id used_activation_id requested_activation_id
   folder="$(state_get folder)"
   report="$(state_dir)/report.json"
@@ -597,11 +651,7 @@ fetch_and_write() {
   slug="$(slug_for "$release_date" "$vendor_version" "$id" "$folder")"
   dir="$folder/releases/$slug"
   write_release_dir "$report" "$dir" || return 1
-  if [ "$latest_mode" = "keep-latest" ]; then
-    echo "latest/ left as it is: a newer release's report is already on record."
-  else
-    refresh_latest "$folder" "$dir"
-  fi
+  refresh_latest "$folder" "$dir" "$release_date"
   ensure_folder_readme "$folder"
 
   verdict="$(extract_verdict "$report" "$dir/REPORT.md")"
@@ -655,7 +705,11 @@ fetch_and_write() {
     echo
     echo "Stage: \`$stage\`, status: \`$rstatus\`, corrections_due_by: $due"
     echo
-    echo "Report: \`$dir/REPORT.md\` (copy in \`$folder/latest/REPORT.md\`)"
+    if [ "$(jq -r '.release_id // empty' "$folder/latest/release.json" 2>/dev/null)" = "$id" ]; then
+      echo "Report: \`$dir/REPORT.md\` (copy in \`$folder/latest/REPORT.md\`)"
+    else
+      echo "Report: \`$dir/REPORT.md\`"
+    fi
     echo
     echo "<details><summary>Top of the report</summary>"
     echo
